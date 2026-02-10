@@ -64,20 +64,21 @@ class Repository:
         return Part(**dict(rows[0])) if rows else None
 
     def search_parts(self, query: str) -> list[Part]:
-        """Full-text search across parts."""
+        """Search parts by keyword across multiple fields."""
         if not query.strip():
             return self.get_all_parts()
-        # FTS5 query — append * for prefix matching
-        fts_query = " ".join(f"{term}*" for term in query.split())
+        pattern = f"%{query.strip()}%"
         rows = self.db.execute("""
             SELECT p.*, COALESCE(c.name, '') AS category_name
             FROM parts p
             LEFT JOIN categories c ON p.category_id = c.id
-            WHERE p.id IN (
-                SELECT rowid FROM parts_fts WHERE parts_fts MATCH ?
-            )
+            WHERE p.part_number LIKE ?
+               OR p.description LIKE ?
+               OR p.location LIKE ?
+               OR p.supplier LIKE ?
+               OR p.notes LIKE ?
             ORDER BY p.part_number
-        """, (fts_query,))
+        """, (pattern, pattern, pattern, pattern, pattern))
         return [Part(**dict(r)) for r in rows]
 
     def get_parts_by_category(self, category_id: int) -> list[Part]:
