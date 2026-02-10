@@ -1,0 +1,28 @@
+# Environment & secrets
+.env
+.env.*
+
+# Google OAuth credentials
+credentials.json
+token.json
+
+# Intermediate/temp files
+.tmp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
