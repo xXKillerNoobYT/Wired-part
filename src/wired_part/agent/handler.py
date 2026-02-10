@@ -2,6 +2,7 @@
 
 import json
 
+from wired_part.database.models import Notification
 from wired_part.database.repository import Repository
 from wired_part.utils.formatters import format_currency
 
@@ -9,8 +10,9 @@ from wired_part.utils.formatters import format_currency
 class ToolHandler:
     """Executes tool calls from the LLM against the repository."""
 
-    def __init__(self, repo: Repository):
+    def __init__(self, repo: Repository, agent_source: str = "system"):
         self.repo = repo
+        self.agent_source = agent_source
 
     def execute(self, tool_name: str, arguments: str) -> str:
         """Run a tool and return a JSON string result."""
@@ -23,6 +25,12 @@ class ToolHandler:
             "get_low_stock_parts": self._get_low_stock_parts,
             "get_inventory_summary": self._get_inventory_summary,
             "get_job_summary": self._get_job_summary,
+            "get_truck_inventory": self._get_truck_inventory,
+            "get_pending_transfers": self._get_pending_transfers,
+            "get_all_trucks": self._get_all_trucks,
+            "create_notification": self._create_notification,
+            "get_jobs_without_users": self._get_jobs_without_users,
+            "get_consumption_log": self._get_consumption_log,
         }
 
         handler = dispatch.get(tool_name)
@@ -122,3 +130,103 @@ class ToolHandler:
             "total_jobs": summary.get("total_jobs", 0),
             "total_cost": format_currency(summary.get("total_cost", 0)),
         }
+
+    def _get_truck_inventory(self, truck_number: str = "") -> dict:
+        trucks = self.repo.get_all_trucks(active_only=False)
+        truck = next(
+            (t for t in trucks if t.truck_number == truck_number), None
+        )
+        if not truck:
+            return {"error": f"Truck '{truck_number}' not found"}
+        inventory = self.repo.get_truck_inventory(truck.id)
+        return {
+            "truck_number": truck.truck_number,
+            "truck_name": truck.name,
+            "assigned_to": truck.assigned_user_name or "Unassigned",
+            "parts": [
+                {
+                    "part_number": item.part_number,
+                    "description": item.part_description,
+                    "quantity": item.quantity,
+                    "value": format_currency(item.quantity * item.unit_cost),
+                }
+                for item in inventory
+            ],
+        }
+
+    def _get_pending_transfers(self) -> list[dict]:
+        transfers = self.repo.get_all_pending_transfers()
+        return [
+            {
+                "id": t.id,
+                "truck_number": t.truck_number,
+                "part_number": t.part_number,
+                "description": t.part_description,
+                "quantity": t.quantity,
+                "created_by": t.created_by_name,
+                "created_at": str(t.created_at or ""),
+            }
+            for t in transfers
+        ]
+
+    def _get_all_trucks(self) -> list[dict]:
+        trucks = self.repo.get_all_trucks(active_only=True)
+        result = []
+        for truck in trucks:
+            summary = self.repo.get_truck_summary(truck.id)
+            result.append({
+                "truck_number": truck.truck_number,
+                "name": truck.name,
+                "assigned_to": truck.assigned_user_name or "Unassigned",
+                "on_hand_parts": summary.get("unique_parts", 0),
+                "total_quantity": summary.get("total_quantity", 0),
+                "total_value": format_currency(
+                    summary.get("total_value", 0)
+                ),
+                "pending_transfers": summary.get("pending_transfers", 0),
+            })
+        return result
+
+    def _create_notification(self, title: str = "", message: str = "",
+                             severity: str = "info") -> dict:
+        notification = Notification(
+            user_id=None,  # Broadcast to all
+            title=title,
+            message=message,
+            severity=severity,
+            source=self.agent_source,
+        )
+        nid = self.repo.create_notification(notification)
+        return {"status": "created", "notification_id": nid}
+
+    def _get_jobs_without_users(self) -> list[dict]:
+        jobs = self.repo.get_all_jobs(status="active")
+        unassigned = []
+        for job in jobs:
+            assignments = self.repo.get_job_assignments(job.id)
+            if not assignments:
+                unassigned.append({
+                    "job_number": job.job_number,
+                    "name": job.name,
+                    "customer": job.customer or "",
+                    "status": job.status,
+                })
+        return unassigned
+
+    def _get_consumption_log(self) -> list[dict]:
+        logs = self.repo.get_consumption_log()
+        return [
+            {
+                "job_number": cl.job_number,
+                "truck_number": cl.truck_number,
+                "part_number": cl.part_number,
+                "description": cl.part_description,
+                "quantity": cl.quantity,
+                "cost": format_currency(
+                    cl.quantity * cl.unit_cost_at_use
+                ),
+                "consumed_by": cl.consumed_by_name,
+                "consumed_at": str(cl.consumed_at or ""),
+            }
+            for cl in logs[:20]  # Limit to last 20
+        ]

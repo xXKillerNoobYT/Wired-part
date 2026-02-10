@@ -102,4 +102,99 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_truck_inventory",
+            "description": "Get on-hand inventory for a specific truck.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "truck_number": {
+                        "type": "string",
+                        "description": "The truck number to look up",
+                    },
+                },
+                "required": ["truck_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pending_transfers",
+            "description": (
+                "Get all pending transfers across all trucks "
+                "that have not yet been received."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_trucks",
+            "description": "Get a list of all active trucks with their details.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_notification",
+            "description": (
+                "Create a notification for the system. "
+                "Use this to alert users about issues found during audits."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short notification title",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Detailed notification message",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["info", "warning", "critical"],
+                        "description": "Notification severity level",
+                    },
+                },
+                "required": ["title", "message", "severity"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_jobs_without_users",
+            "description": (
+                "Get all active jobs that have no users assigned to them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_consumption_log",
+            "description": "Get recent part consumption log entries.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wired_part.database.models import Job
+from wired_part.database.models import Job, User
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import JOB_STATUSES
 from wired_part.utils.formatters import format_currency
@@ -33,9 +33,10 @@ from wired_part.utils.formatters import format_currency
 class JobsPage(QWidget):
     """Jobs management with list and detail panels."""
 
-    def __init__(self, repo: Repository):
+    def __init__(self, repo: Repository, current_user: User = None):
         super().__init__()
         self.repo = repo
+        self.current_user = current_user
         self._jobs: list[Job] = []
         self._selected_job: Optional[Job] = None
         self._setup_ui()
@@ -151,6 +152,28 @@ class JobsPage(QWidget):
         parts_group.setLayout(parts_layout)
         layout.addWidget(parts_group)
 
+        # Assigned users
+        users_group = QGroupBox("Assigned Users")
+        users_layout = QVBoxLayout()
+        self.users_list = QListWidget()
+        self.users_list.setMaximumHeight(80)
+        users_layout.addWidget(self.users_list)
+
+        user_btns = QHBoxLayout()
+        self.assign_user_btn = QPushButton("+ Assign User")
+        self.assign_user_btn.clicked.connect(self._on_assign_user)
+        self.assign_user_btn.setEnabled(False)
+        user_btns.addWidget(self.assign_user_btn)
+
+        self.consume_btn = QPushButton("Consume from Truck")
+        self.consume_btn.clicked.connect(self._on_consume)
+        self.consume_btn.setEnabled(False)
+        user_btns.addWidget(self.consume_btn)
+        users_layout.addLayout(user_btns)
+
+        users_group.setLayout(users_layout)
+        layout.addWidget(users_group)
+
         # Job action buttons
         action_btns = QHBoxLayout()
         self.edit_btn = QPushButton("Edit")
@@ -208,8 +231,10 @@ class JobsPage(QWidget):
         self.detail_notes.setText("-")
         self.parts_table.setRowCount(0)
         self.total_cost_label.setText("Total: $0.00")
+        self.users_list.clear()
         for btn in (self.edit_btn, self.complete_btn, self.delete_btn,
-                     self.assign_btn, self.remove_part_btn):
+                     self.assign_btn, self.remove_part_btn,
+                     self.assign_user_btn, self.consume_btn):
             btn.setEnabled(False)
 
     def _on_job_selected(self, current, previous):
@@ -251,6 +276,12 @@ class JobsPage(QWidget):
         total = self.repo.get_job_total_cost(job.id)
         self.total_cost_label.setText(f"Total: {format_currency(total)}")
 
+        # Load assigned users
+        assignments = self.repo.get_job_assignments(job.id)
+        self.users_list.clear()
+        for a in assignments:
+            self.users_list.addItem(f"{a.user_name} ({a.role.title()})")
+
         # Enable buttons
         is_active = job.status == "active"
         self.edit_btn.setEnabled(True)
@@ -258,6 +289,8 @@ class JobsPage(QWidget):
         self.delete_btn.setEnabled(True)
         self.assign_btn.setEnabled(is_active)
         self.remove_part_btn.setEnabled(is_active)
+        self.assign_user_btn.setEnabled(is_active)
+        self.consume_btn.setEnabled(is_active)
 
     def _on_filter(self):
         self.refresh()
@@ -341,4 +374,25 @@ class JobsPage(QWidget):
         )
         if reply == QMessageBox.Yes:
             self.repo.remove_part_from_job(jp.id)
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_assign_user(self):
+        if not self._selected_job:
+            return
+        from wired_part.ui.dialogs.job_assign_dialog import JobAssignDialog
+        dialog = JobAssignDialog(
+            self.repo, self._selected_job.id, parent=self
+        )
+        if dialog.exec():
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_consume(self):
+        if not self._selected_job:
+            return
+        from wired_part.ui.dialogs.consume_dialog import ConsumeDialog
+        dialog = ConsumeDialog(
+            self.repo, self._selected_job.id,
+            self.current_user, parent=self
+        )
+        if dialog.exec():
             self._on_job_selected(self.job_list.currentItem(), None)

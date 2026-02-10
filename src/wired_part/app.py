@@ -34,9 +34,27 @@ def main():
     _load_theme(app)
 
     # Import here to avoid circular imports and let DB init first
+    from wired_part.database.repository import Repository
+    from wired_part.ui.login_dialog import FirstRunDialog, LoginDialog
     from wired_part.ui.main_window import MainWindow
 
-    window = MainWindow(db)
+    repo = Repository(db)
+
+    # First-run setup: create admin if no users exist
+    if repo.user_count() == 0:
+        first_run = FirstRunDialog(repo)
+        if first_run.exec() != FirstRunDialog.Accepted:
+            sys.exit(0)
+        current_user = first_run.created_user
+    else:
+        # Login screen
+        login = LoginDialog(repo)
+        if login.exec() != LoginDialog.Accepted:
+            sys.exit(0)
+        current_user = login.authenticated_user
+
+    # Launch main window
+    window = MainWindow(db, current_user)
     window.show()
 
     sys.exit(app.exec())
