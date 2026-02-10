@@ -50,6 +50,7 @@ class Job:
     customer: str = ""
     address: str = ""
     status: str = "active"
+    priority: int = 3  # 1=highest, 5=lowest
     notes: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -178,3 +179,47 @@ class ConsumptionLog:
     truck_number: str = field(default="", repr=False)
     job_number: str = field(default="", repr=False)
     consumed_by_name: str = field(default="", repr=False)
+
+
+@dataclass
+class Supplier:
+    id: Optional[int] = None
+    name: str = ""
+    contact_name: str = ""
+    email: str = ""
+    phone: str = ""
+    address: str = ""
+    notes: str = ""
+    preference_score: int = 50  # 0-100, higher = preferred
+    delivery_schedule: str = ""  # JSON or text description
+    is_active: int = 1
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+@dataclass
+class PartsList:
+    id: Optional[int] = None
+    name: str = ""
+    list_type: str = "general"  # general, specific, fast
+    job_id: Optional[int] = None
+    notes: str = ""
+    created_by: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Joined fields
+    job_number: str = field(default="", repr=False)
+    created_by_name: str = field(default="", repr=False)
+
+
+@dataclass
+class PartsListItem:
+    id: Optional[int] = None
+    list_id: int = 0
+    part_id: int = 0
+    quantity: int = 1
+    notes: str = ""
+    # Joined fields
+    part_number: str = field(default="", repr=False)
+    part_description: str = field(default="", repr=False)
+    unit_cost: float = field(default=0.0, repr=False)

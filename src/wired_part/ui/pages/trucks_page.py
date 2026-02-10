@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -54,6 +55,17 @@ class TrucksPage(QWidget):
         toolbar.addWidget(transfer_btn)
         toolbar.addWidget(receive_btn)
         toolbar.addWidget(return_btn)
+
+        # Filter trucks
+        toolbar.addWidget(QLabel("  View:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItem("All Trucks", "all")
+        self.filter_combo.addItem("My Truck", "mine")
+        self.filter_combo.addItem("With Pending Transfers", "pending")
+        self.filter_combo.addItem("Unassigned", "unassigned")
+        self.filter_combo.currentIndexChanged.connect(self._refresh_truck_list)
+        toolbar.addWidget(self.filter_combo)
+
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
@@ -129,6 +141,24 @@ class TrucksPage(QWidget):
 
     def _refresh_truck_list(self):
         trucks = self.repo.get_all_trucks(active_only=True)
+
+        # Apply filter
+        filter_val = self.filter_combo.currentData()
+        if filter_val == "mine":
+            trucks = [
+                t for t in trucks
+                if t.assigned_user_id == self.current_user.id
+            ]
+        elif filter_val == "pending":
+            trucks = [
+                t for t in trucks
+                if self.repo.get_truck_transfers(
+                    t.id, status="pending"
+                )
+            ]
+        elif filter_val == "unassigned":
+            trucks = [t for t in trucks if not t.assigned_user_id]
+
         self.truck_list.clear()
         self._trucks = trucks
         for truck in trucks:

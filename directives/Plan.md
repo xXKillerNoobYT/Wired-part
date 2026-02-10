@@ -1,37 +1,110 @@
-### Updated Parts Manager System Plan: Active Jobs, Trucks, User Assignments, and LLM Background Tasks
+# Comprehensive Breakdown of the Parts Manager Program
 
-This update integrates the new requirements into the electrician-focused Parts Manager app. Key additions:
-- **Truck Assignments**: Each user (electrician) is assigned to a specific truck (their "signed vehicle"), with a shared truck list showing assignments.
-- **Active Jobs**: Users have prioritized "active jobs" they're working on (not strictly locked, but focused). Access is restricted to active jobs only—users can't view/edit inactive ones.
-- **Job Consumption Tracking**: Quick, easy logging of parts consumed on jobs (e.g., one-click deductions from truck stock during job execution).
-- **LLM Background Tasks**: Use the local desktop LLM for administrative agents that handle hard-to-code tasks in the background. These small agents will use a couple of custom "MCP tools" (interpreting as "Minimal Custom Protocol tools" or simple API-like hooks; e.g., DB query tools, notification tools) to automate lookups, add items (e.g., "add cards" as adding parts/inventory cards), ask clarifying questions (via app prompts), remind of audits, and periodically scan for inconsistencies (e.g., mismatched stock levels, lost parts) to ensure accuracy.
+This is the most thorough and accurate breakdown I can provide of the **Parts Manager** program, based on all requirements discussed. The program is a **desktop-only, offline-first inventory and job management system tailored for electricians**. It tracks electrical parts through a strict flow (Supplier → Warehouse → Truck → Job), enforces policies like "warehouse-first" and accurate consumption, supports multi-user/multi-truck/multi-job workflows (including multi-year jobs), and uses a **local LLM** for intelligent automation and background administrative tasks.
 
-The app remains **desktop-only, offline-first, multi-user** with **heavy local processing**. LLM runs in background threads for non-blocking tasks (e.g., periodic audits every hour or on app idle). Agents are "small" and focused: Built on the repo's orchestration (Planning/Answer/Verification) with custom tools like DB access or user notification hooks.
+The system is designed for **small electrician teams** using a shared high-powered desktop (heavy local processing, GPU-optional for LLM). It is fully functional offline, with optional syncing via Google Drive or a local folder.
 
-Below, features and goals are listed for the new/relevant components: User/Truck Assignments, Active Jobs Management, Parts Consumption on Jobs, and LLM Background Agents.
+## 1. Program Overview
 
-#### User and Truck Assignments
-| Perspective | Features | Goals |
-|-------------|----------|-------|
-| User | - Truck list view: See all trucks with assigned users (e.g., "Truck #3: Assigned to User A").<br>- Personal assignment: Each user sees their "signed vehicle" highlighted.<br>- Multi-user sharing: Admins can reassign trucks; users see team assignments.<br>- Filter trucks by active jobs or availability. | - Clear visibility of who has which truck for coordination.<br>- Prioritize user's own truck for quick access to stock/jobs.<br>- Support team workflows without locking resources. |
-| Developer | - DB: User table links to Truck table (one-to-many; user can have one primary truck).<br>- UI: Table or cards for truck list, with assignment dropdowns.<br>- Multi-user locks: Prevent concurrent reassignments via transactions.<br>- Notifications: Alert on assignment changes. | - Simple linking for traceability.<br>- Handle offline changes (sync on reconnect if shared DB).<br>- Scale for small teams (10-20 users/trucks). |
+| Aspect                  | Details |
+|-------------------------|---------|
+| **Purpose**             | Comprehensive parts/inventory management for electricians, with full traceability, intelligent ordering, job-focused workflows, and proactive accuracy checks to prevent lost parts. |
+| **Target Users**        | Electricians (field users), managers/admins (oversight, ordering, audits). Multi-user on shared desktop. |
+| **Core Principles**     | - Offline-first<br>- Warehouse-first policy<br>- Full parts tracking end-to-end<br>- Quick, easy consumption logging<br>- Intelligent but user-overridable automation<br>- Local-only LLM for privacy and speed |
+| **Key Differentiators** | - Electrician-specific (wire/outlet grouping, bundles like "outlet + cover plate")<br>- Active jobs/trucks with user assignments<br>- Background LLM agents for hard-to-code admin tasks (audits, inconsistency detection)<br>- Intelligent order splitting with email drafts |
 
-#### Active Jobs Management
-| Perspective | Features | Goals |
-|-------------|----------|-------|
-| User | - Active Jobs List: Personalized dashboard showing user's prioritized active jobs (e.g., sorted by deadline or assignment).<br>- Access restrictions: Only view/edit active jobs; inactive ones hidden or read-only.<br>- Multi-job support: Users can work on multiple active jobs (not locked), but prioritize their own.<br>- Team overlap: See if others are on the same job, with shared updates.<br>- Long-term jobs: Track progress over years, with activation/deactivation toggles. | - Focus users on relevant work without distractions.<br>- Enable collaboration on shared jobs.<br>- Handle multi-year electrical projects efficiently. |
-| Developer | - DB: Jobs table with "active" flag, user assignments (many-to-many), and priority scores.<br>- Access control: Query filters by user + active status.<br>- UI: Dashboard with tabs for "My Active Jobs" vs. "All Active."<br>- Agents: LLM can suggest priority adjustments based on history. | - Enforce restrictions without complex auth.<br>- Efficient queries for large job histories.<br>- Integrate with truck assignments (e.g., link job to user's truck). |
+## 2. Architecture & Tech Stack
 
-#### Parts Consumption on Jobs
-| Perspective | Features | Goals |
-|-------------|----------|-------|
-| User | - Quick consumption logging: From job view, select parts from truck stock and "consume" with one click (deducts from inventory, logs to job history).<br>- Easy tracking: Auto-update parts list as consumed; show remaining stock.<br>- Bundle support: Consume related parts together (e.g., wire + connectors).<br>- Alerts: Warn if consumption would deplete critical stock. | - Fast on-site recording for electricians.<br>- Accurate real-time inventory to prevent losses.<br>- Seamless integration with job flow (truck → job). |
-| Developer | - Workflow: DB triggers on consumption (update stock, add log entry).<br>- UI: Mobile-like forms for quick entry (scan or dropdown).<br>- Validation: Check against truck assignment and active job.<br>- Offline: Queue logs for sync. | - Built-in to core logic for reliability.<br>- Quick performance (no heavy compute needed).<br>- Tie to audits for accuracy. |
+| Layer                   | Technology Choices | Rationale |
+|-------------------------|--------------------|-----------|
+| **Frontend/UI**         | Electron (or Tauri for lighter) + React/Vite for desktop app | Cross-platform desktop, mobile-friendly forms for field use |
+| **Backend/Logic**       | Node.js (Electron) or Rust (Tauri) + local SQLite | Heavy local processing, simple file-based DB |
+| **Database**            | SQLite (local file) with transactions/locking for multi-user | Offline-first, concurrent reads, serialized writes |
+| **LLM Integration**     | Local-only: Ollama, LM Studio, or LocalAI (OpenAI-compatible API on localhost) | Desktop-only models (e.g., Llama 3.2 8B–32B), background threading |
+| **Agents**              | Based on copilot-orchestration-extension concepts (Planning/Answer/Verification + SQLite tickets) with custom "MCP" tools (simple DB/notification hooks) | Small, focused agents for special tasks |
+| **Syncing**             | Google Drive API or watched desktop folder (JSON/SQL dumps) | Optional multi-device backup, eventual consistency |
+| **Deployment**          | Single executable installer, local only (no server) | Easy setup for small teams |
 
-#### LLM Background Agents for Administrative Tasks
-| Perspective | Features | Goals |
-|-------------|----------|-------|
-| User | - Background automation: Agents run periodically (e.g., every hour) to check inconsistencies (e.g., "Parts consumed don't match stock changes").<br>- Notifications: Pop-up or in-app alerts for issues (e.g., "Audit reminder: Verify Truck #2 stock").<br>- Lookups/Adds: Agent can query info (e.g., "Find part alternatives") or add items (e.g., "Add new part card from description").<br>- Questions/Reminders: Prompt user for clarifications (e.g., "Confirm this return?") or remind of audits.<br>- Accuracy focus: Catch potential losses (e.g., unmatched consumptions) and suggest fixes. | - Hands-off management for admins/electricians.<br>- Proactive error catching for precise inventory.<br>- Easier than manual checks, especially for multi-user setups. |
-| Developer | - Small Agents: Build 2-3 focused ones using repo's orchestration + local LLM.<br>  - Agent 1: Audit Agent (scans DB for mismatches; uses MCP tools like "query_stock" and "notify_user").<br>  - Agent 2: Admin Helper (handles lookups/adds; tools like "db_insert" and "prompt_user").<br>  - Agent 3: Reminder Agent (schedules audits/questions; tool for "schedule_task").<br>- Background: Run in threads/timers; low-priority to not block UI.<br>- Custom MCP Tools: Simple functions (e.g., DB wrappers) exposed to LLM via API-like calls.<br>- Config: Toggle frequency, enable/disable per user. | - Leverage LLM for fuzzy tasks (e.g., detecting "info that doesn't add up").<br>- Keep agents minimal (few tools) for speed on desktop.<br>- Secure: Tools only access DB, no external calls.<br>- Integrate with tickets for human-AI loop (e.g., flag issues as tickets). |
+## 3. Data Model (High-Level Schema)
 
-This enhances the system's usability for teams, with a focus on accuracy and automation. The LLM agents make complex admin tasks feasible without overcomplicating the code. If you need more on agent tools, UI sketches, or DB expansions, let me know!
+Key tables with critical fields (SQLite):
+
+- **Users**: id, username, password_hash, assigned_truck_id, role (admin/electrician)
+- **Trucks**: id, name, assigned_user_id (primary), current_location/notes
+- **Parts**: id, internal_number (unique), brand_number, supplier_numbers (JSON array per brand), description, images (local paths/URLs per brand), type_group (e.g., "Wire", "Outlet"), cost_mix fields, general_vs_specific flag
+- **Suppliers**: id, name, preferences_score (per user/group), delivery_schedule (JSON days/dates), contact_info
+- **WarehouseStock**: part_id, quantity, location/bin, non_returnable_flag
+- **TruckStock**: truck_id, part_id, quantity
+- **Jobs**: id, name, start/end_date, status (active/inactive), assigned_users (many-to-many), assigned_truck_id, timeline_history (JSON logs), preferences (brand/color etc.)
+- **PartsLists**: id, job_id (or general template), items (JSON: part_id, quantity, specific overrides), type (general/specific/fast)
+- **Orders/Returns**: id, supplier_id, items, status, delivery_date, email_draft_log
+- **ConsumptionLogs/AuditLogs**: timestamp, user_id, job_id, part_id, quantity, action (consume/return/transfer)
+
+All movements timestamped and logged for full traceability.
+
+## 4. Core Flow & Policies
+
+Strict flow with automatic tracking:
+
+1. **Supplier → Warehouse**: Incoming orders confirmed, stock added (non-returnable focus).
+2. **Warehouse → Truck**: Checklist transfers, warehouse-first policy enforced.
+3. **Truck → Job**: Offload/consume parts (quick logging deducts from truck stock).
+4. **Returns**: Prefer original supplier, easy restock to warehouse in reverse order. 
+
+Policies:
+- Warehouse stock used **first** for all lists/orders.
+- Consumption logged **immediately** on jobs to prevent losses.
+
+## 5. Key Features Breakdown
+
+### A. Parts Catalog
+- Multiple part numbers (internal/brand/supplier per brand)
+- Images per brand variant or warehouse slot
+- Easy merging of duplicates (LLM-assisted suggestions)
+- Type grouping for mixing/searches
+- General vs. Specific parts distinction
+
+### B. Parts Lists
+- General templates (reusable, easy add/edit)
+- Specific instances created from general or "fast lists"
+- Intelligent suggestions (bundles like wire + nuts, based on history)
+- Auto-fill job preferences (brand, color, etc.)
+
+### C. Ordering System
+- Take any parts list → intelligent split by supplier (preferences, schedule, cost, delivery alignment)
+- User-friendly overrides (drag-drop, bulk reassign)
+- One-click email drafts per supplier (templated, editable, mailto: launch)
+
+### D. Job & Truck Management
+- User-truck assignments ("signed vehicle")
+- Active Jobs dashboard (personal priority list, restricted access to inactive)
+- Multi-user/multi-job (including multi-year with timelines)
+- Quick consumption logging from truck to job
+
+### E. LLM Background Agents
+Small, focused agents running periodically/in background:
+- **Audit Agent**: Scan for inconsistencies (e.g., stock vs. consumption mismatches) → notify/flag
+- **Admin Helper**: Lookups, add new parts/cards, clarify ambiguities via prompts
+- **Reminder Agent**: Audit reminders, questions for users
+Custom MCP tools: DB query/insert, user notification, ticket creation
+
+Uses repo-style orchestration + local LLM for tasks hard to hard-code.
+
+## 6. User Interface Highlights
+- Dashboard: My Truck + My Active Jobs priority view
+- Parts search/filter by any number, group, image preview
+- Checklist modes for transfers/deliveries
+- Editable grids for order splitting
+- Progress bars for heavy LLM tasks
+- Notifications for agent findings
+
+## 7. Security & Multi-User
+- Simple login with roles
+- Audit logs per action/user
+- DB file locking for concurrency
+- All data local/encrypted optional
+
+## 8. Licensing (As Discussed)
+Source-available via **Functional Source License (FSL)** with automatic conversion to MIT/Apache after ~2 years. Commercial use requiring charging money needs separate license with **10% revenue share** (contact @WeirdTooLLC).
+
+This breakdown captures every requirement in detail. The program is practical, focused, and powerful for real electrician teams while remaining fully local and private. If anything is missing or needs expansion (e.g., wireframes, sample code, or schema SQL), let me know!

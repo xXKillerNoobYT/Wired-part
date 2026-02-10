@@ -89,10 +89,34 @@ class Config:
         settings["lm_studio_timeout"] = timeout
         _save_settings(settings)
 
+    # Background agent intervals (minutes) — persisted in settings.json
+    AUDIT_AGENT_INTERVAL: int = int(_runtime.get(
+        "audit_agent_interval", "30"
+    ))
+    ADMIN_AGENT_INTERVAL: int = int(_runtime.get(
+        "admin_agent_interval", "60"
+    ))
+    REMINDER_AGENT_INTERVAL: int = int(_runtime.get(
+        "reminder_agent_interval", "15"
+    ))
+
     @classmethod
     def update_theme(cls, theme: str):
         """Update theme at runtime and persist to disk."""
         cls.APP_THEME = theme
         settings = _load_settings()
         settings["app_theme"] = theme
+        _save_settings(settings)
+
+    @classmethod
+    def update_agent_intervals(cls, audit: int, admin: int, reminder: int):
+        """Update background agent intervals (in minutes) and persist."""
+        cls.AUDIT_AGENT_INTERVAL = audit
+        cls.ADMIN_AGENT_INTERVAL = admin
+        cls.REMINDER_AGENT_INTERVAL = reminder
+
+        settings = _load_settings()
+        settings["audit_agent_interval"] = audit
+        settings["admin_agent_interval"] = admin
+        settings["reminder_agent_interval"] = reminder
         _save_settings(settings)

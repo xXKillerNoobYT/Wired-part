@@ -12,6 +12,9 @@ from .models import (
     JobPart,
     Notification,
     Part,
+    PartsList,
+    PartsListItem,
+    Supplier,
     Truck,
     TruckInventory,
     TruckTransfer,
@@ -264,12 +267,13 @@ class Repository:
     def get_all_jobs(self, status: Optional[str] = None) -> list[Job]:
         if status and status != "all":
             rows = self.db.execute(
-                "SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC",
+                "SELECT * FROM jobs WHERE status = ? "
+                "ORDER BY priority ASC, created_at DESC",
                 (status,),
             )
         else:
             rows = self.db.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC"
+                "SELECT * FROM jobs ORDER BY priority ASC, created_at DESC"
             )
         return [Job(**dict(r)) for r in rows]
 
@@ -287,11 +291,12 @@ class Repository:
         with self.db.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO jobs
-                    (job_number, name, customer, address, status, notes)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (job_number, name, customer, address, status,
+                     priority, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 job.job_number, job.name, job.customer,
-                job.address, job.status, job.notes,
+                job.address, job.status, job.priority, job.notes,
             ))
             return cursor.lastrowid
 
@@ -300,13 +305,13 @@ class Repository:
             conn.execute("""
                 UPDATE jobs SET
                     job_number = ?, name = ?, customer = ?,
-                    address = ?, status = ?, notes = ?,
-                    completed_at = ?
+                    address = ?, status = ?, priority = ?,
+                    notes = ?, completed_at = ?
                 WHERE id = ?
             """, (
                 job.job_number, job.name, job.customer,
-                job.address, job.status, job.notes,
-                job.completed_at, job.id,
+                job.address, job.status, job.priority,
+                job.notes, job.completed_at, job.id,
             ))
 
     def delete_job(self, job_id: int):
@@ -492,6 +497,10 @@ class Repository:
         return Truck(**dict(rows[0])) if rows else None
 
     def update_truck(self, truck: Truck):
+        # Check if assignment changed to create notification
+        old_truck = self.get_truck_by_id(truck.id)
+        old_user_id = old_truck.assigned_user_id if old_truck else None
+
         with self.db.get_connection() as conn:
             conn.execute("""
                 UPDATE trucks SET
@@ -502,6 +511,31 @@ class Repository:
                 truck.truck_number, truck.name, truck.assigned_user_id,
                 truck.notes, truck.is_active, truck.id,
             ))
+
+        # Notify affected users of assignment changes
+        if old_user_id != truck.assigned_user_id:
+            if old_user_id:
+                self.create_notification(Notification(
+                    user_id=old_user_id,
+                    title="Truck Unassigned",
+                    message=(
+                        f"You have been unassigned from truck "
+                        f"{truck.truck_number} ({truck.name})."
+                    ),
+                    severity="info",
+                    source="system",
+                ))
+            if truck.assigned_user_id:
+                self.create_notification(Notification(
+                    user_id=truck.assigned_user_id,
+                    title="Truck Assigned",
+                    message=(
+                        f"You have been assigned to truck "
+                        f"{truck.truck_number} ({truck.name})."
+                    ),
+                    severity="info",
+                    source="system",
+                ))
 
     # ── Truck Inventory (On-Hand) ───────────────────────────────
 
@@ -769,6 +803,29 @@ class Repository:
                 job_id, truck_id, part_id, quantity,
                 unit_cost, user_id, notes,
             ))
+
+            # Check for low warehouse stock and create alert
+            stock_row = conn.execute(
+                "SELECT part_number, quantity, min_quantity "
+                "FROM parts WHERE id = ?",
+                (part_id,),
+            ).fetchone()
+            if stock_row and stock_row["min_quantity"] > 0:
+                if stock_row["quantity"] < stock_row["min_quantity"]:
+                    deficit = stock_row["min_quantity"] - stock_row["quantity"]
+                    conn.execute("""
+                        INSERT INTO notifications
+                            (user_id, title, message, severity, source)
+                        VALUES (NULL, ?, ?, 'warning', 'system')
+                    """, (
+                        f"Low Stock: {stock_row['part_number']}",
+                        f"Warehouse stock for {stock_row['part_number']} "
+                        f"is at {stock_row['quantity']} "
+                        f"(min: {stock_row['min_quantity']}, "
+                        f"need {deficit} more). "
+                        f"Consider reordering.",
+                    ))
+
             return cursor.lastrowid
 
     def get_consumption_log(self, job_id: int = None,
@@ -908,3 +965,267 @@ class Repository:
         if pending_rows:
             result["pending_transfers"] = pending_rows[0]["pending_transfers"]
         return result
+
+    # ── Suppliers ─────────────────────────────────────────────────
+
+    def create_supplier(self, supplier: Supplier) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO suppliers
+                    (name, contact_name, email, phone, address,
+                     notes, preference_score, delivery_schedule, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                supplier.name, supplier.contact_name, supplier.email,
+                supplier.phone, supplier.address, supplier.notes,
+                supplier.preference_score, supplier.delivery_schedule,
+                supplier.is_active,
+            ))
+            return cursor.lastrowid
+
+    def get_all_suppliers(self, active_only: bool = True) -> list[Supplier]:
+        if active_only:
+            rows = self.db.execute(
+                "SELECT * FROM suppliers WHERE is_active = 1 "
+                "ORDER BY preference_score DESC, name"
+            )
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM suppliers ORDER BY preference_score DESC, name"
+            )
+        return [Supplier(**dict(r)) for r in rows]
+
+    def get_supplier_by_id(self, supplier_id: int) -> Optional[Supplier]:
+        rows = self.db.execute(
+            "SELECT * FROM suppliers WHERE id = ?", (supplier_id,)
+        )
+        return Supplier(**dict(rows[0])) if rows else None
+
+    def update_supplier(self, supplier: Supplier):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE suppliers SET
+                    name = ?, contact_name = ?, email = ?, phone = ?,
+                    address = ?, notes = ?, preference_score = ?,
+                    delivery_schedule = ?, is_active = ?
+                WHERE id = ?
+            """, (
+                supplier.name, supplier.contact_name, supplier.email,
+                supplier.phone, supplier.address, supplier.notes,
+                supplier.preference_score, supplier.delivery_schedule,
+                supplier.is_active, supplier.id,
+            ))
+
+    def delete_supplier(self, supplier_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM suppliers WHERE id = ?", (supplier_id,)
+            )
+
+    # ── Parts Lists ──────────────────────────────────────────────
+
+    def create_parts_list(self, parts_list: PartsList) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO parts_lists
+                    (name, list_type, job_id, notes, created_by)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                parts_list.name, parts_list.list_type,
+                parts_list.job_id, parts_list.notes,
+                parts_list.created_by,
+            ))
+            return cursor.lastrowid
+
+    def get_all_parts_lists(
+        self, list_type: Optional[str] = None
+    ) -> list[PartsList]:
+        if list_type:
+            rows = self.db.execute("""
+                SELECT pl.*,
+                       COALESCE(j.job_number, '') AS job_number,
+                       COALESCE(u.display_name, '') AS created_by_name
+                FROM parts_lists pl
+                LEFT JOIN jobs j ON pl.job_id = j.id
+                LEFT JOIN users u ON pl.created_by = u.id
+                WHERE pl.list_type = ?
+                ORDER BY pl.created_at DESC
+            """, (list_type,))
+        else:
+            rows = self.db.execute("""
+                SELECT pl.*,
+                       COALESCE(j.job_number, '') AS job_number,
+                       COALESCE(u.display_name, '') AS created_by_name
+                FROM parts_lists pl
+                LEFT JOIN jobs j ON pl.job_id = j.id
+                LEFT JOIN users u ON pl.created_by = u.id
+                ORDER BY pl.created_at DESC
+            """)
+        return [PartsList(**dict(r)) for r in rows]
+
+    def get_parts_list_by_id(
+        self, list_id: int
+    ) -> Optional[PartsList]:
+        rows = self.db.execute("""
+            SELECT pl.*,
+                   COALESCE(j.job_number, '') AS job_number,
+                   COALESCE(u.display_name, '') AS created_by_name
+            FROM parts_lists pl
+            LEFT JOIN jobs j ON pl.job_id = j.id
+            LEFT JOIN users u ON pl.created_by = u.id
+            WHERE pl.id = ?
+        """, (list_id,))
+        return PartsList(**dict(rows[0])) if rows else None
+
+    def update_parts_list(self, parts_list: PartsList):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE parts_lists SET
+                    name = ?, list_type = ?, job_id = ?, notes = ?
+                WHERE id = ?
+            """, (
+                parts_list.name, parts_list.list_type,
+                parts_list.job_id, parts_list.notes,
+                parts_list.id,
+            ))
+
+    def delete_parts_list(self, list_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM parts_lists WHERE id = ?", (list_id,)
+            )
+
+    def add_item_to_parts_list(
+        self, item: PartsListItem
+    ) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO parts_list_items
+                    (list_id, part_id, quantity, notes)
+                VALUES (?, ?, ?, ?)
+            """, (
+                item.list_id, item.part_id,
+                item.quantity, item.notes,
+            ))
+            return cursor.lastrowid
+
+    def get_parts_list_items(
+        self, list_id: int
+    ) -> list[PartsListItem]:
+        rows = self.db.execute("""
+            SELECT pli.*,
+                   p.part_number, p.description AS part_description,
+                   p.unit_cost
+            FROM parts_list_items pli
+            JOIN parts p ON pli.part_id = p.id
+            WHERE pli.list_id = ?
+            ORDER BY p.part_number
+        """, (list_id,))
+        return [PartsListItem(**dict(r)) for r in rows]
+
+    def remove_item_from_parts_list(self, item_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM parts_list_items WHERE id = ?",
+                (item_id,),
+            )
+
+    # ── Billing / Reports ────────────────────────────────────────
+
+    def get_billing_data(self, job_id: int,
+                         date_from: str = None,
+                         date_to: str = None) -> dict:
+        """Get comprehensive billing data for a job.
+
+        Returns job info, consumed parts with costs, and totals.
+        Optionally filtered by date range for progress billing.
+        """
+        job = self.get_job_by_id(job_id)
+        if not job:
+            return {}
+
+        # Get consumption records for the job
+        conditions = ["cl.job_id = ?"]
+        params: list = [job_id]
+        if date_from:
+            conditions.append("cl.consumed_at >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("cl.consumed_at <= ?")
+            params.append(date_to)
+
+        where = " AND ".join(conditions)
+        rows = self.db.execute(f"""
+            SELECT cl.*,
+                   p.part_number, p.description AS part_description,
+                   t.truck_number, j.job_number,
+                   COALESCE(u.display_name, '') AS consumed_by_name,
+                   COALESCE(c.name, 'Uncategorized') AS category_name
+            FROM consumption_log cl
+            JOIN parts p ON cl.part_id = p.id
+            JOIN trucks t ON cl.truck_id = t.id
+            JOIN jobs j ON cl.job_id = j.id
+            LEFT JOIN users u ON cl.consumed_by = u.id
+            LEFT JOIN categories c ON p.category_id = c.id
+            WHERE {where}
+            ORDER BY c.name, p.part_number
+        """, tuple(params))
+
+        # Also include directly assigned parts (from warehouse)
+        jp_rows = self.db.execute("""
+            SELECT jp.*, p.part_number, p.description AS part_description,
+                   COALESCE(c.name, 'Uncategorized') AS category_name
+            FROM job_parts jp
+            JOIN parts p ON jp.part_id = p.id
+            LEFT JOIN categories c ON p.category_id = c.id
+            WHERE jp.job_id = ?
+            ORDER BY c.name, p.part_number
+        """, (job_id,))
+
+        # Build line items grouped by category
+        categories_dict: dict = {}
+        subtotal = 0.0
+
+        for r in jp_rows:
+            cat = r["category_name"]
+            if cat not in categories_dict:
+                categories_dict[cat] = []
+            line_total = r["quantity_used"] * (r["unit_cost_at_use"] or 0)
+            categories_dict[cat].append({
+                "part_number": r["part_number"],
+                "description": r["part_description"],
+                "quantity": r["quantity_used"],
+                "unit_cost": r["unit_cost_at_use"] or 0,
+                "line_total": line_total,
+            })
+            subtotal += line_total
+
+        # Get assigned users
+        assignments = self.get_job_assignments(job_id)
+
+        return {
+            "job": {
+                "job_number": job.job_number,
+                "name": job.name,
+                "customer": job.customer or "",
+                "address": job.address or "",
+                "status": job.status,
+                "priority": job.priority,
+                "created_at": str(job.created_at or ""),
+                "completed_at": str(job.completed_at or ""),
+            },
+            "date_range": {
+                "from": date_from or "",
+                "to": date_to or "",
+            },
+            "categories": categories_dict,
+            "subtotal": subtotal,
+            "assigned_users": [
+                {
+                    "name": a.user_name,
+                    "role": a.role,
+                }
+                for a in assignments
+            ],
+            "consumption_count": len(rows),
+        }

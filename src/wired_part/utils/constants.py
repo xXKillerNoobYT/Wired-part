@@ -1,11 +1,20 @@
 """Application-wide constants."""
 
 APP_NAME = "Wired-Part"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 APP_ORGANIZATION = "WeirdToo LLC"
 
 # Job statuses
 JOB_STATUSES = ["active", "completed", "on_hold", "cancelled"]
+
+# Job priorities (1=highest, 5=lowest)
+JOB_PRIORITIES = {
+    1: "Urgent",
+    2: "High",
+    3: "Normal",
+    4: "Low",
+    5: "Deferred",
+}
 
 # User roles
 USER_ROLES = ["admin", "user"]
@@ -30,13 +39,16 @@ NOTIFICATION_SOURCES = [
     "reminder_agent",
 ]
 
+# Parts list types
+PARTS_LIST_TYPES = ["general", "specific", "fast"]
+
 # Default window size
 DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 800
 MIN_WINDOW_WIDTH = 900
 MIN_WINDOW_HEIGHT = 600
 
-# Background agent intervals (milliseconds)
-AUDIT_AGENT_INTERVAL = 30 * 60 * 1000      # 30 minutes
-ADMIN_AGENT_INTERVAL = 60 * 60 * 1000      # 60 minutes
-REMINDER_AGENT_INTERVAL = 15 * 60 * 1000   # 15 minutes
+# Background agent intervals (minutes) — defaults, overridable via Config
+AUDIT_AGENT_INTERVAL_DEFAULT = 30
+ADMIN_AGENT_INTERVAL_DEFAULT = 60
+REMINDER_AGENT_INTERVAL_DEFAULT = 15

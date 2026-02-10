@@ -11,11 +11,6 @@ from wired_part.agent.prompts import (
 from wired_part.config import Config
 from wired_part.database.models import User
 from wired_part.database.repository import Repository
-from wired_part.utils.constants import (
-    ADMIN_AGENT_INTERVAL,
-    AUDIT_AGENT_INTERVAL,
-    REMINDER_AGENT_INTERVAL,
-)
 
 
 class AgentWorker(QThread):
@@ -97,35 +92,42 @@ class AgentManager(QObject):
         self._enabled = False
         self._last_results: dict[str, str] = {}
 
-        # Agent configurations
+        # Agent configurations — intervals read from Config at start time
         self._agents = {
             "audit_agent": {
                 "prompt": AUDIT_AGENT_PROMPT,
                 "task": "Run your audit checks now and report any issues found.",
-                "interval": AUDIT_AGENT_INTERVAL,
                 "source": "audit_agent",
             },
             "admin_agent": {
                 "prompt": ADMIN_AGENT_PROMPT,
                 "task": "Generate a daily activity summary now.",
-                "interval": ADMIN_AGENT_INTERVAL,
                 "source": "admin_agent",
             },
             "reminder_agent": {
                 "prompt": REMINDER_AGENT_PROMPT,
                 "task": "Check for items needing attention and create reminders.",
-                "interval": REMINDER_AGENT_INTERVAL,
                 "source": "reminder_agent",
             },
         }
 
+    def _get_interval_ms(self, agent_name: str) -> int:
+        """Get interval in milliseconds from Config (minutes -> ms)."""
+        intervals = {
+            "audit_agent": Config.AUDIT_AGENT_INTERVAL,
+            "admin_agent": Config.ADMIN_AGENT_INTERVAL,
+            "reminder_agent": Config.REMINDER_AGENT_INTERVAL,
+        }
+        minutes = intervals.get(agent_name, 30)
+        return max(minutes, 1) * 60 * 1000  # Minimum 1 minute
+
     def start(self):
         """Start all background agent timers."""
         self._enabled = True
-        for name, config in self._agents.items():
+        for name in self._agents:
             timer = QTimer(self)
             timer.timeout.connect(lambda n=name: self._run_agent(n))
-            timer.start(config["interval"])
+            timer.start(self._get_interval_ms(name))
             self._timers[name] = timer
 
     def stop(self):

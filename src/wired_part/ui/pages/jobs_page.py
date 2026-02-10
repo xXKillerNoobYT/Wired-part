@@ -115,6 +115,9 @@ class JobsPage(QWidget):
         self.detail_status = QLabel("-")
         info_layout.addRow("Status:", self.detail_status)
 
+        self.detail_priority = QLabel("-")
+        info_layout.addRow("Priority:", self.detail_priority)
+
         self.detail_notes = QLabel("-")
         self.detail_notes.setWordWrap(True)
         info_layout.addRow("Notes:", self.detail_notes)
@@ -198,6 +201,11 @@ class JobsPage(QWidget):
         self.delete_btn.setEnabled(False)
         action_btns.addWidget(self.delete_btn)
 
+        self.billing_btn = QPushButton("Generate Billing")
+        self.billing_btn.clicked.connect(self._on_billing)
+        self.billing_btn.setEnabled(False)
+        action_btns.addWidget(self.billing_btn)
+
         layout.addLayout(action_btns)
         return panel
 
@@ -217,9 +225,12 @@ class JobsPage(QWidget):
             ]
 
         self.job_list.clear()
+        _PRIORITY_LABELS = {1: "P1", 2: "P2", 3: "P3", 4: "P4", 5: "P5"}
         for job in self._jobs:
+            p_label = _PRIORITY_LABELS.get(job.priority, "P3")
             item = QListWidgetItem(
-                f"{job.job_number}\n{job.name}\nStatus: {job.status.title()}"
+                f"[{p_label}] {job.job_number}\n"
+                f"{job.name}\nStatus: {job.status.title()}"
             )
             item.setData(Qt.UserRole, job.id)
             self.job_list.addItem(item)
@@ -235,13 +246,15 @@ class JobsPage(QWidget):
         self.detail_customer.setText("-")
         self.detail_address.setText("-")
         self.detail_status.setText("-")
+        self.detail_priority.setText("-")
         self.detail_notes.setText("-")
         self.parts_table.setRowCount(0)
         self.total_cost_label.setText("Total: $0.00")
         self.users_list.clear()
         for btn in (self.edit_btn, self.complete_btn, self.delete_btn,
                      self.assign_btn, self.remove_part_btn,
-                     self.assign_user_btn, self.consume_btn):
+                     self.assign_user_btn, self.consume_btn,
+                     self.billing_btn):
             btn.setEnabled(False)
 
     def _on_job_selected(self, current, previous):
@@ -256,12 +269,19 @@ class JobsPage(QWidget):
             self._clear_detail()
             return
 
+        _PRIORITY_NAMES = {
+            1: "1 — Urgent", 2: "2 — High", 3: "3 — Normal",
+            4: "4 — Low", 5: "5 — Deferred",
+        }
         self._selected_job = job
         self.detail_number.setText(job.job_number)
         self.detail_name.setText(job.name)
         self.detail_customer.setText(job.customer or "-")
         self.detail_address.setText(job.address or "-")
         self.detail_status.setText(job.status.title())
+        self.detail_priority.setText(
+            _PRIORITY_NAMES.get(job.priority, "3 — Normal")
+        )
         self.detail_notes.setText(job.notes or "-")
 
         # Load assigned parts
@@ -298,6 +318,7 @@ class JobsPage(QWidget):
         self.remove_part_btn.setEnabled(is_active)
         self.assign_user_btn.setEnabled(is_active)
         self.consume_btn.setEnabled(is_active)
+        self.billing_btn.setEnabled(True)  # Always available for billing
 
     def _on_filter(self):
         self.refresh()
@@ -403,3 +424,12 @@ class JobsPage(QWidget):
         )
         if dialog.exec():
             self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_billing(self):
+        if not self._selected_job:
+            return
+        from wired_part.ui.dialogs.billing_dialog import BillingDialog
+        dialog = BillingDialog(
+            self.repo, self._selected_job.id, parent=self
+        )
+        dialog.exec()

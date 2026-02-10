@@ -168,12 +168,25 @@ class AgentPage(QWidget):
         layout.addWidget(self.connection_label)
 
     def refresh(self):
-        """Called when tab is selected — re-check connection."""
-        self._check_connection()
+        """Called when tab is selected — reconnect if settings changed."""
+        # Update the connection info label to reflect current config
+        self.connection_label.setText(
+            f"LM Studio @ {Config.LM_STUDIO_BASE_URL}  |  "
+            f"Model: {Config.LM_STUDIO_MODEL}"
+        )
+
+        # Auto-reconnect if config changed since last connect
+        current_url = Config.LM_STUDIO_BASE_URL
+        if (not self.client
+                or getattr(self, "_last_url", None) != current_url):
+            self._try_connect()
+        else:
+            self._check_connection()
         self._update_bg_status()
 
     def _try_connect(self):
         """Initialize or reconnect the LLM client."""
+        self._last_url = Config.LM_STUDIO_BASE_URL
         self.client = LMStudioClient(
             tool_executor=self.tool_handler.execute
         )

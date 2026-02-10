@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QMessageBox,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
 )
@@ -64,6 +65,17 @@ class JobDialog(QDialog):
             self.status_input.addItem(s.title(), s)
         form.addRow("Status:", self.status_input)
 
+        self.priority_input = QSpinBox()
+        self.priority_input.setRange(1, 5)
+        self.priority_input.setValue(3)
+        self.priority_input.setToolTip(
+            "1 = Highest priority, 5 = Lowest priority"
+        )
+        self.priority_input.setSuffix(
+            "  (1=Highest, 5=Lowest)"
+        )
+        form.addRow("Priority:", self.priority_input)
+
         self.notes_input = QTextEdit()
         self.notes_input.setMaximumHeight(80)
         form.addRow("Notes:", self.notes_input)
@@ -86,6 +98,7 @@ class JobDialog(QDialog):
         idx = self.status_input.findData(job.status)
         if idx >= 0:
             self.status_input.setCurrentIndex(idx)
+        self.priority_input.setValue(job.priority or 3)
 
     def _on_save(self):
         name = self.name_input.text().strip()
@@ -100,6 +113,7 @@ class JobDialog(QDialog):
             customer=self.customer_input.text().strip(),
             address=self.address_input.text().strip(),
             status=self.status_input.currentData(),
+            priority=self.priority_input.value(),
             notes=self.notes_input.toPlainText().strip(),
         )
 
