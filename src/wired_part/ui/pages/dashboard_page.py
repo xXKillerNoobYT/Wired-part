@@ -42,7 +42,7 @@ class SummaryCard(QFrame):
 
 
 class DashboardPage(QWidget):
-    """Main dashboard with summary cards and recent activity."""
+    """Main dashboard with summary cards, personal info, and alerts."""
 
     def __init__(self, repo: Repository, current_user: User, parent=None):
         super().__init__(parent)
@@ -54,8 +54,8 @@ class DashboardPage(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # Title
-        title = QLabel("Dashboard")
+        # Title with user greeting
+        title = QLabel(f"Dashboard — Welcome, {self.current_user.display_name}")
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         layout.addWidget(title)
 
@@ -78,14 +78,39 @@ class DashboardPage(QWidget):
 
         layout.addLayout(cards_layout)
 
-        # Bottom section: recent activity + notifications
+        # Middle section: My Active Jobs + My Truck
+        middle = QHBoxLayout()
+
+        # My active jobs
+        my_jobs_group = QGroupBox("My Active Jobs")
+        my_jobs_layout = QVBoxLayout(my_jobs_group)
+        self.my_jobs_list = QListWidget()
+        self.my_jobs_list.setMaximumHeight(180)
+        my_jobs_layout.addWidget(self.my_jobs_list)
+        middle.addWidget(my_jobs_group)
+
+        # My truck
+        my_truck_group = QGroupBox("My Truck")
+        my_truck_layout = QVBoxLayout(my_truck_group)
+        self.my_truck_label = QLabel("No truck assigned")
+        self.my_truck_label.setWordWrap(True)
+        self.my_truck_label.setStyleSheet("padding: 8px;")
+        my_truck_layout.addWidget(self.my_truck_label)
+        self.truck_inv_list = QListWidget()
+        self.truck_inv_list.setMaximumHeight(140)
+        my_truck_layout.addWidget(self.truck_inv_list)
+        middle.addWidget(my_truck_group)
+
+        layout.addLayout(middle)
+
+        # Bottom section: notifications + low stock
         bottom = QHBoxLayout()
 
         # Recent notifications
         notif_group = QGroupBox("Recent Notifications")
         notif_layout = QVBoxLayout(notif_group)
         self.notif_list = QListWidget()
-        self.notif_list.setMaximumHeight(200)
+        self.notif_list.setMaximumHeight(160)
         notif_layout.addWidget(self.notif_list)
         bottom.addWidget(notif_group)
 
@@ -93,7 +118,7 @@ class DashboardPage(QWidget):
         alerts_group = QGroupBox("Low Stock Alerts")
         alerts_layout = QVBoxLayout(alerts_group)
         self.alerts_list = QListWidget()
-        self.alerts_list.setMaximumHeight(200)
+        self.alerts_list.setMaximumHeight(160)
         alerts_layout.addWidget(self.alerts_list)
         bottom.addWidget(alerts_group)
 
@@ -120,6 +145,59 @@ class DashboardPage(QWidget):
         # Pending transfers
         pending = self.repo.get_all_pending_transfers()
         self.pending_card.set_value(str(len(pending)))
+
+        # My Active Jobs
+        self.my_jobs_list.clear()
+        all_active = self.repo.get_all_jobs("active")
+        my_jobs = []
+        for job in all_active:
+            assignments = self.repo.get_job_assignments(job.id)
+            if any(a.user_id == self.current_user.id for a in assignments):
+                my_jobs.append(job)
+        if my_jobs:
+            for job in my_jobs:
+                role_list = self.repo.get_job_assignments(job.id)
+                my_role = next(
+                    (a.role for a in role_list
+                     if a.user_id == self.current_user.id),
+                    "worker",
+                )
+                item = QListWidgetItem(
+                    f"{job.job_number} — {job.name} [{my_role.title()}]"
+                )
+                self.my_jobs_list.addItem(item)
+        else:
+            self.my_jobs_list.addItem("No active job assignments")
+
+        # My Truck
+        self.truck_inv_list.clear()
+        my_truck = None
+        for truck in trucks:
+            if truck.assigned_user_id == self.current_user.id:
+                my_truck = truck
+                break
+        if my_truck:
+            self.my_truck_label.setText(
+                f"<b>{my_truck.truck_number}</b> — {my_truck.name}"
+            )
+            truck_inv = self.repo.get_truck_inventory(my_truck.id)
+            if truck_inv:
+                for ti in truck_inv[:10]:
+                    self.truck_inv_list.addItem(
+                        f"{ti.part_number}: {ti.quantity} on-hand"
+                    )
+            else:
+                self.truck_inv_list.addItem("No parts on truck")
+            # Show pending transfers for my truck
+            my_pending = self.repo.get_truck_transfers(
+                my_truck.id, status="pending"
+            )
+            if my_pending:
+                self.truck_inv_list.addItem(
+                    f"--- {len(my_pending)} pending transfer(s) ---"
+                )
+        else:
+            self.my_truck_label.setText("No truck assigned to you")
 
         # Notifications
         self.notif_list.clear()

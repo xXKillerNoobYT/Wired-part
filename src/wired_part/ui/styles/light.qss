@@ -9,7 +9,7 @@ QWidget {
     background-color: #eff1f5;
     color: #4c4f69;
     font-family: "Segoe UI", sans-serif;
-    font-size: 13px;
+    font-size: 10pt;
 }
 
 QTabWidget::pane {

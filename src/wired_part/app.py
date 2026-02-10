@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from wired_part.config import Config
@@ -29,6 +30,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Wired-Part")
     app.setOrganizationName("WeirdToo LLC")
+
+    # Set application font before theme to avoid -1 pointSize warnings
+    font = QFont("Segoe UI", 10)
+    app.setFont(font)
 
     # Apply theme
     _load_theme(app)

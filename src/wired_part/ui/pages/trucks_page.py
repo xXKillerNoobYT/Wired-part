@@ -137,6 +137,12 @@ class TrucksPage(QWidget):
                 label += f" ({truck.assigned_user_name})"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, truck.id)
+            # Highlight the current user's assigned truck
+            if (self.current_user
+                    and truck.assigned_user_id == self.current_user.id):
+                item.setBackground(Qt.GlobalColor.darkGreen)
+                label = f">> {label} << (My Truck)"
+                item.setText(label)
             self.truck_list.addItem(item)
 
     def _get_selected_truck_id(self):
@@ -293,7 +299,7 @@ class TrucksPage(QWidget):
         qty, ok = QInputDialog.getInt(
             self, "Return Quantity",
             f"How many '{part_number}' to return? (on-hand: {qty_str})",
-            value=1, min=1, max=int(qty_str),
+            1, 1, int(qty_str),
         )
         if ok and qty > 0:
             try:

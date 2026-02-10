@@ -40,6 +40,13 @@ class JobsPage(QWidget):
         self._jobs: list[Job] = []
         self._selected_job: Optional[Job] = None
         self._setup_ui()
+
+        # Default to "Active" for regular users, "All" for admins
+        if self.current_user and self.current_user.role != "admin":
+            idx = self.status_filter.findData("active")
+            if idx >= 0:
+                self.status_filter.setCurrentIndex(idx)
+
         self.refresh()
 
     def _setup_ui(self):
