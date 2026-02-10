@@ -66,6 +66,30 @@ class Config:
         os.getenv("LM_STUDIO_TIMEOUT", "60"),
     ))
 
+    # Labor settings (settings.json overrides defaults)
+    DEFAULT_LABOR_RATE: float = float(_runtime.get(
+        "default_labor_rate",
+        os.getenv("DEFAULT_LABOR_RATE", "0.0"),
+    ))
+    GEOFENCE_RADIUS: float = float(_runtime.get(
+        "geofence_radius",
+        os.getenv("GEOFENCE_RADIUS", "0.5"),
+    ))
+    PHOTOS_DIRECTORY: str = _runtime.get(
+        "photos_directory",
+        os.getenv("PHOTOS_DIRECTORY", str(_PROJECT_ROOT / "data" / "photos")),
+    )
+    OVERTIME_THRESHOLD: float = float(_runtime.get(
+        "overtime_threshold",
+        os.getenv("OVERTIME_THRESHOLD", "8.0"),
+    ))
+
+    # Notebook template (settings.json overrides default sections)
+    NOTEBOOK_SECTIONS_TEMPLATE: list = _runtime.get(
+        "notebook_sections_template",
+        None,  # None = use DEFAULT_NOTEBOOK_SECTIONS from constants
+    )
+
     # UI
     APP_THEME: str = _runtime.get(
         "app_theme",
@@ -120,3 +144,40 @@ class Config:
         settings["admin_agent_interval"] = admin
         settings["reminder_agent_interval"] = reminder
         _save_settings(settings)
+
+    @classmethod
+    def update_labor_settings(cls, rate: float, radius: float,
+                              photos_dir: str, overtime: float):
+        """Update labor-related settings and persist."""
+        cls.DEFAULT_LABOR_RATE = rate
+        cls.GEOFENCE_RADIUS = radius
+        cls.PHOTOS_DIRECTORY = photos_dir
+        cls.OVERTIME_THRESHOLD = overtime
+
+        settings = _load_settings()
+        settings["default_labor_rate"] = rate
+        settings["geofence_radius"] = radius
+        settings["photos_directory"] = photos_dir
+        settings["overtime_threshold"] = overtime
+        _save_settings(settings)
+
+    @classmethod
+    def update_notebook_template(cls, sections: list[str]):
+        """Update the default notebook sections template and persist."""
+        cls.NOTEBOOK_SECTIONS_TEMPLATE = sections
+
+        settings = _load_settings()
+        settings["notebook_sections_template"] = sections
+        _save_settings(settings)
+
+    @classmethod
+    def get_notebook_sections(cls) -> list[str]:
+        """Get the notebook sections to use for new jobs.
+
+        Returns the custom template if set, otherwise falls back
+        to DEFAULT_NOTEBOOK_SECTIONS from constants.
+        """
+        if cls.NOTEBOOK_SECTIONS_TEMPLATE:
+            return list(cls.NOTEBOOK_SECTIONS_TEMPLATE)
+        from wired_part.utils.constants import DEFAULT_NOTEBOOK_SECTIONS
+        return list(DEFAULT_NOTEBOOK_SECTIONS)

@@ -68,10 +68,12 @@ class DashboardPage(QWidget):
         self.jobs_card = SummaryCard("Active Jobs")
         self.trucks_card = SummaryCard("Active Trucks")
         self.pending_card = SummaryCard("Pending Transfers")
+        self.hours_card = SummaryCard("Hours This Week")
 
         cards_layout.addWidget(self.parts_card, 0, 0)
         cards_layout.addWidget(self.value_card, 0, 1)
         cards_layout.addWidget(self.low_stock_card, 0, 2)
+        cards_layout.addWidget(self.hours_card, 0, 3)
         cards_layout.addWidget(self.jobs_card, 1, 0)
         cards_layout.addWidget(self.trucks_card, 1, 1)
         cards_layout.addWidget(self.pending_card, 1, 2)
@@ -100,6 +102,20 @@ class DashboardPage(QWidget):
         self.truck_inv_list.setMaximumHeight(140)
         my_truck_layout.addWidget(self.truck_inv_list)
         middle.addWidget(my_truck_group)
+
+        # Currently clocked in
+        clock_group = QGroupBox("Currently Clocked In")
+        clock_layout = QVBoxLayout(clock_group)
+        self.clock_status_label = QLabel("Not clocked in")
+        self.clock_status_label.setWordWrap(True)
+        self.clock_status_label.setStyleSheet("padding: 8px;")
+        clock_layout.addWidget(self.clock_status_label)
+
+        self.quick_clock_out_btn = QPushButton("Quick Clock Out")
+        self.quick_clock_out_btn.clicked.connect(self._on_quick_clock_out)
+        self.quick_clock_out_btn.setEnabled(False)
+        clock_layout.addWidget(self.quick_clock_out_btn)
+        middle.addWidget(clock_group)
 
         layout.addLayout(middle)
 
@@ -145,6 +161,35 @@ class DashboardPage(QWidget):
         # Pending transfers
         pending = self.repo.get_all_pending_transfers()
         self.pending_card.set_value(str(len(pending)))
+
+        # Hours this week
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        week_start = today - timedelta(days=today.weekday())
+        week_start_str = week_start.strftime("%Y-%m-%d")
+        today_str = today.strftime("%Y-%m-%d")
+        my_entries = self.repo.get_labor_entries_for_user(
+            self.current_user.id,
+            date_from=week_start_str,
+            date_to=today_str,
+        )
+        weekly_hours = sum(e.hours or 0 for e in my_entries)
+        self.hours_card.set_value(f"{weekly_hours:.1f}")
+
+        # Currently clocked in
+        active_entry = self.repo.get_active_clock_in(self.current_user.id)
+        if active_entry:
+            self.clock_status_label.setText(
+                f"<b>Job:</b> {active_entry.job_number or 'N/A'}<br>"
+                f"<b>Category:</b> {active_entry.sub_task_category}<br>"
+                f"<b>Since:</b> {str(active_entry.start_time)[:16]}"
+            )
+            self.quick_clock_out_btn.setEnabled(True)
+            self._active_entry_id = active_entry.id
+        else:
+            self.clock_status_label.setText("Not clocked in")
+            self.quick_clock_out_btn.setEnabled(False)
+            self._active_entry_id = None
 
         # My Active Jobs
         self.my_jobs_list.clear()
@@ -226,3 +271,14 @@ class DashboardPage(QWidget):
                 )
         else:
             self.alerts_list.addItem("All stock levels are healthy")
+
+    def _on_quick_clock_out(self):
+        """Quick clock out from the dashboard."""
+        if not self._active_entry_id:
+            return
+        from wired_part.ui.dialogs.clock_dialog import ClockOutDialog
+        dialog = ClockOutDialog(
+            self.repo, self._active_entry_id, parent=self
+        )
+        if dialog.exec():
+            self.refresh()

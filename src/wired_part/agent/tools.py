@@ -197,4 +197,58 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_labor_summary",
+            "description": (
+                "Get labor summary for a specific job: total hours, cost, "
+                "breakdown by category and user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_number": {
+                        "type": "string",
+                        "description": "The job number to get labor summary for",
+                    },
+                },
+                "required": ["job_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_active_clockins",
+            "description": (
+                "Get all currently active clock-ins across all users. "
+                "Returns entries where end_time is NULL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_notes",
+            "description": (
+                "Search across all job notebook pages by keyword. "
+                "Returns matching page titles, content snippets, and job info."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term to find in page titles and content",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]

@@ -7,18 +7,30 @@ from .connection import DatabaseConnection
 from .models import (
     Category,
     ConsumptionLog,
+    Hat,
     Job,
     JobAssignment,
+    JobLocation,
+    JobNotebook,
     JobPart,
+    LaborEntry,
+    NotebookPage,
+    NotebookSection,
     Notification,
     Part,
     PartsList,
     PartsListItem,
+    PurchaseOrder,
+    PurchaseOrderItem,
+    ReceiveLogEntry,
+    ReturnAuthorization,
+    ReturnAuthorizationItem,
     Supplier,
     Truck,
     TruckInventory,
     TruckTransfer,
     User,
+    UserHat,
 )
 
 
@@ -1228,4 +1240,1573 @@ class Repository:
                 for a in assignments
             ],
             "consumption_count": len(rows),
+        }
+
+    # ── Labor Entries ─────────────────────────────────────────────
+
+    def create_labor_entry(self, entry: LaborEntry) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO labor_entries
+                    (user_id, job_id, start_time, end_time, hours,
+                     description, sub_task_category, photos,
+                     clock_in_lat, clock_in_lon, clock_out_lat, clock_out_lon,
+                     rate_per_hour, is_overtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                entry.user_id, entry.job_id, entry.start_time,
+                entry.end_time, entry.hours, entry.description,
+                entry.sub_task_category, entry.photos,
+                entry.clock_in_lat, entry.clock_in_lon,
+                entry.clock_out_lat, entry.clock_out_lon,
+                entry.rate_per_hour, entry.is_overtime,
+            ))
+            return cursor.lastrowid
+
+    def update_labor_entry(self, entry: LaborEntry):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE labor_entries SET
+                    user_id = ?, job_id = ?, start_time = ?, end_time = ?,
+                    hours = ?, description = ?, sub_task_category = ?,
+                    photos = ?, clock_in_lat = ?, clock_in_lon = ?,
+                    clock_out_lat = ?, clock_out_lon = ?,
+                    rate_per_hour = ?, is_overtime = ?
+                WHERE id = ?
+            """, (
+                entry.user_id, entry.job_id, entry.start_time,
+                entry.end_time, entry.hours, entry.description,
+                entry.sub_task_category, entry.photos,
+                entry.clock_in_lat, entry.clock_in_lon,
+                entry.clock_out_lat, entry.clock_out_lon,
+                entry.rate_per_hour, entry.is_overtime, entry.id,
+            ))
+
+    def delete_labor_entry(self, entry_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM labor_entries WHERE id = ?", (entry_id,)
+            )
+
+    def get_labor_entry_by_id(self, entry_id: int) -> Optional[LaborEntry]:
+        rows = self.db.execute("""
+            SELECT le.*,
+                   u.display_name AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            JOIN jobs j ON le.job_id = j.id
+            WHERE le.id = ?
+        """, (entry_id,))
+        return LaborEntry(**dict(rows[0])) if rows else None
+
+    def get_labor_entries_for_job(
+        self, job_id: int,
+        date_from: str = None, date_to: str = None
+    ) -> list[LaborEntry]:
+        conditions = ["le.job_id = ?"]
+        params: list = [job_id]
+        if date_from:
+            conditions.append("le.start_time >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("le.start_time <= ?")
+            params.append(date_to)
+        where = " AND ".join(conditions)
+        rows = self.db.execute(f"""
+            SELECT le.*,
+                   u.display_name AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            JOIN jobs j ON le.job_id = j.id
+            WHERE {where}
+            ORDER BY le.start_time DESC
+        """, tuple(params))
+        return [LaborEntry(**dict(r)) for r in rows]
+
+    def get_labor_entries_for_user(
+        self, user_id: int,
+        date_from: str = None, date_to: str = None
+    ) -> list[LaborEntry]:
+        conditions = ["le.user_id = ?"]
+        params: list = [user_id]
+        if date_from:
+            conditions.append("le.start_time >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("le.start_time <= ?")
+            params.append(date_to)
+        where = " AND ".join(conditions)
+        rows = self.db.execute(f"""
+            SELECT le.*,
+                   u.display_name AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            JOIN jobs j ON le.job_id = j.id
+            WHERE {where}
+            ORDER BY le.start_time DESC
+        """, tuple(params))
+        return [LaborEntry(**dict(r)) for r in rows]
+
+    def get_active_clock_in(self, user_id: int) -> Optional[LaborEntry]:
+        """Get the active (un-clocked-out) labor entry for a user."""
+        rows = self.db.execute("""
+            SELECT le.*,
+                   u.display_name AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            JOIN jobs j ON le.job_id = j.id
+            WHERE le.user_id = ? AND le.end_time IS NULL
+            ORDER BY le.start_time DESC LIMIT 1
+        """, (user_id,))
+        return LaborEntry(**dict(rows[0])) if rows else None
+
+    def clock_in(self, user_id: int, job_id: int,
+                 category: str = "General",
+                 lat: float = None, lon: float = None,
+                 rate: float = 0.0,
+                 photos: str = None) -> int:
+        """Start a clock-in entry for a user on a job."""
+        from datetime import datetime
+        # Check for existing active clock-in
+        active = self.get_active_clock_in(user_id)
+        if active:
+            raise ValueError(
+                f"Already clocked in to job {active.job_number} "
+                f"since {active.start_time}"
+            )
+        entry = LaborEntry(
+            user_id=user_id,
+            job_id=job_id,
+            start_time=datetime.now().isoformat(),
+            sub_task_category=category,
+            clock_in_lat=lat,
+            clock_in_lon=lon,
+            rate_per_hour=rate,
+            photos=photos or "[]",
+        )
+        entry_id = self.create_labor_entry(entry)
+
+        # Create clock-in notification for all users on this job
+        job = self.get_job_by_id(job_id)
+        user = self.get_user_by_id(user_id)
+        job_label = job.job_number if job else f"Job #{job_id}"
+        user_name = user.display_name if user else f"User #{user_id}"
+
+        self.create_notification(Notification(
+            user_id=None,  # broadcast to all users
+            title="Clock In",
+            message=(
+                f"{user_name} clocked in to {job_label} — "
+                f"{category}"
+            ),
+            severity="info",
+            source="labor",
+        ))
+        return entry_id
+
+    def clock_out(self, entry_id: int,
+                  lat: float = None, lon: float = None,
+                  description: str = "",
+                  photos: str = "[]") -> Optional[LaborEntry]:
+        """Clock out from an active entry, computing hours."""
+        from datetime import datetime
+        entry = self.get_labor_entry_by_id(entry_id)
+        if not entry:
+            raise ValueError(f"Labor entry {entry_id} not found")
+        if entry.end_time:
+            raise ValueError(f"Entry {entry_id} is already clocked out")
+
+        now = datetime.now()
+        start = datetime.fromisoformat(str(entry.start_time))
+        hours = (now - start).total_seconds() / 3600.0
+
+        entry.end_time = now.isoformat()
+        entry.hours = round(hours, 2)
+        entry.description = description
+        entry.clock_out_lat = lat
+        entry.clock_out_lon = lon
+        entry.photos = photos
+        self.update_labor_entry(entry)
+
+        # Create clock-out notification
+        refreshed = self.get_labor_entry_by_id(entry_id)
+        user = self.get_user_by_id(entry.user_id)
+        user_name = user.display_name if user else f"User #{entry.user_id}"
+        job_label = refreshed.job_number if refreshed else f"Job #{entry.job_id}"
+
+        self.create_notification(Notification(
+            user_id=None,  # broadcast to all users
+            title="Clock Out",
+            message=(
+                f"{user_name} clocked out of {job_label} — "
+                f"{entry.hours:.1f}h worked"
+            ),
+            severity="info",
+            source="labor",
+        ))
+        return refreshed
+
+    def get_labor_summary_for_job(self, job_id: int) -> dict:
+        """Get labor summary: total hours, cost, breakdown by category/user."""
+        rows = self.db.execute("""
+            SELECT
+                COALESCE(SUM(hours), 0) AS total_hours,
+                COALESCE(SUM(hours * rate_per_hour), 0) AS total_cost,
+                COUNT(*) AS entry_count
+            FROM labor_entries WHERE job_id = ?
+        """, (job_id,))
+        summary = dict(rows[0]) if rows else {
+            "total_hours": 0, "total_cost": 0, "entry_count": 0
+        }
+
+        # By category
+        cat_rows = self.db.execute("""
+            SELECT sub_task_category,
+                   COALESCE(SUM(hours), 0) AS hours,
+                   COUNT(*) AS entries
+            FROM labor_entries WHERE job_id = ?
+            GROUP BY sub_task_category
+            ORDER BY hours DESC
+        """, (job_id,))
+        summary["by_category"] = [dict(r) for r in cat_rows]
+
+        # By user
+        user_rows = self.db.execute("""
+            SELECT u.display_name AS user_name,
+                   COALESCE(SUM(le.hours), 0) AS hours,
+                   COUNT(*) AS entries
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            WHERE le.job_id = ?
+            GROUP BY le.user_id
+            ORDER BY hours DESC
+        """, (job_id,))
+        summary["by_user"] = [dict(r) for r in user_rows]
+
+        return summary
+
+    # ── Job Locations ─────────────────────────────────────────────
+
+    def get_job_location(self, job_id: int) -> Optional[JobLocation]:
+        rows = self.db.execute(
+            "SELECT * FROM job_locations WHERE job_id = ?", (job_id,)
+        )
+        return JobLocation(**dict(rows[0])) if rows else None
+
+    def set_job_location(self, location: JobLocation) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO job_locations
+                    (job_id, latitude, longitude, geocoded_address)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    latitude = excluded.latitude,
+                    longitude = excluded.longitude,
+                    geocoded_address = excluded.geocoded_address,
+                    cached_at = CURRENT_TIMESTAMP
+            """, (
+                location.job_id, location.latitude,
+                location.longitude, location.geocoded_address,
+            ))
+            return cursor.lastrowid
+
+    def delete_job_location(self, job_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM job_locations WHERE job_id = ?", (job_id,)
+            )
+
+    def check_proximity(self, lat: float, lon: float,
+                        job_id: int) -> dict:
+        """Check if coordinates are within geofence radius of a job.
+
+        Returns dict with 'within_radius' (bool) and 'distance_miles' (float).
+        """
+        from wired_part.utils.geo import haversine_miles
+        from wired_part.utils.constants import GEOFENCE_RADIUS_MILES
+
+        location = self.get_job_location(job_id)
+        if not location:
+            return {"within_radius": True, "distance_miles": 0.0,
+                    "no_location": True}
+
+        distance = haversine_miles(lat, lon,
+                                   location.latitude, location.longitude)
+        return {
+            "within_radius": distance <= GEOFENCE_RADIUS_MILES,
+            "distance_miles": round(distance, 2),
+        }
+
+    # ── Job Notebooks ─────────────────────────────────────────────
+
+    def get_or_create_notebook(self, job_id: int) -> JobNotebook:
+        """Get or auto-create a notebook for a job with default sections."""
+        notebook = self.get_notebook_for_job(job_id)
+        if notebook:
+            return notebook
+
+        from wired_part.config import Config
+
+        job = self.get_job_by_id(job_id)
+        title = f"Notebook — {job.job_number}" if job else "Notebook"
+        sections_template = Config.get_notebook_sections()
+
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO job_notebooks (job_id, title)
+                VALUES (?, ?)
+            """, (job_id, title))
+            notebook_id = cursor.lastrowid
+
+            for idx, section_name in enumerate(sections_template):
+                conn.execute("""
+                    INSERT INTO notebook_sections
+                        (notebook_id, name, sort_order)
+                    VALUES (?, ?, ?)
+                """, (notebook_id, section_name, idx))
+
+        return self.get_notebook_for_job(job_id)
+
+    def get_notebook_for_job(self, job_id: int) -> Optional[JobNotebook]:
+        rows = self.db.execute("""
+            SELECT nb.*, COALESCE(j.job_number, '') AS job_number
+            FROM job_notebooks nb
+            LEFT JOIN jobs j ON nb.job_id = j.id
+            WHERE nb.job_id = ?
+        """, (job_id,))
+        return JobNotebook(**dict(rows[0])) if rows else None
+
+    def create_section(self, section: NotebookSection) -> int:
+        with self.db.get_connection() as conn:
+            # Get max sort_order for this notebook
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) AS mx "
+                "FROM notebook_sections WHERE notebook_id = ?",
+                (section.notebook_id,),
+            ).fetchone()
+            sort_order = (row["mx"] + 1) if row else 0
+
+            cursor = conn.execute("""
+                INSERT INTO notebook_sections
+                    (notebook_id, name, sort_order)
+                VALUES (?, ?, ?)
+            """, (section.notebook_id, section.name, sort_order))
+            return cursor.lastrowid
+
+    def update_section(self, section: NotebookSection):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE notebook_sections SET name = ?, sort_order = ?
+                WHERE id = ?
+            """, (section.name, section.sort_order, section.id))
+
+    def delete_section(self, section_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM notebook_sections WHERE id = ?",
+                (section_id,),
+            )
+
+    def get_sections(self, notebook_id: int) -> list[NotebookSection]:
+        rows = self.db.execute("""
+            SELECT * FROM notebook_sections
+            WHERE notebook_id = ?
+            ORDER BY sort_order, name
+        """, (notebook_id,))
+        return [NotebookSection(**dict(r)) for r in rows]
+
+    def reorder_sections(self, notebook_id: int, section_ids: list[int]):
+        """Reorder sections by updating sort_order based on position."""
+        with self.db.get_connection() as conn:
+            for idx, sid in enumerate(section_ids):
+                conn.execute(
+                    "UPDATE notebook_sections SET sort_order = ? "
+                    "WHERE id = ? AND notebook_id = ?",
+                    (idx, sid, notebook_id),
+                )
+
+    def create_page(self, page: NotebookPage) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO notebook_pages
+                    (section_id, title, content, photos,
+                     part_references, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                page.section_id, page.title, page.content,
+                page.photos, page.part_references, page.created_by,
+            ))
+            return cursor.lastrowid
+
+    def update_page(self, page: NotebookPage):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE notebook_pages SET
+                    title = ?, content = ?, photos = ?,
+                    part_references = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                page.title, page.content, page.photos,
+                page.part_references, page.id,
+            ))
+
+    def delete_page(self, page_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM notebook_pages WHERE id = ?", (page_id,)
+            )
+
+    def get_pages(self, section_id: int) -> list[NotebookPage]:
+        rows = self.db.execute("""
+            SELECT np.*, ns.name AS section_name,
+                   COALESCE(u.display_name, '') AS created_by_name
+            FROM notebook_pages np
+            JOIN notebook_sections ns ON np.section_id = ns.id
+            LEFT JOIN users u ON np.created_by = u.id
+            WHERE np.section_id = ?
+            ORDER BY np.created_at DESC
+        """, (section_id,))
+        return [NotebookPage(**dict(r)) for r in rows]
+
+    def get_page_by_id(self, page_id: int) -> Optional[NotebookPage]:
+        rows = self.db.execute("""
+            SELECT np.*, ns.name AS section_name,
+                   COALESCE(u.display_name, '') AS created_by_name
+            FROM notebook_pages np
+            JOIN notebook_sections ns ON np.section_id = ns.id
+            LEFT JOIN users u ON np.created_by = u.id
+            WHERE np.id = ?
+        """, (page_id,))
+        return NotebookPage(**dict(rows[0])) if rows else None
+
+    def search_notebook_pages(
+        self, query: str, job_id: int = None
+    ) -> list[NotebookPage]:
+        """Search notebook pages by title or content."""
+        if not query.strip():
+            return []
+        pattern = f"%{query.strip()}%"
+        params: list = [pattern, pattern]
+        job_filter = ""
+        if job_id is not None:
+            job_filter = "AND nb.job_id = ?"
+            params.append(job_id)
+        rows = self.db.execute(f"""
+            SELECT np.*, ns.name AS section_name,
+                   COALESCE(u.display_name, '') AS created_by_name
+            FROM notebook_pages np
+            JOIN notebook_sections ns ON np.section_id = ns.id
+            JOIN job_notebooks nb ON ns.notebook_id = nb.id
+            LEFT JOIN users u ON np.created_by = u.id
+            WHERE (np.title LIKE ? OR np.content LIKE ?)
+            {job_filter}
+            ORDER BY np.updated_at DESC
+        """, tuple(params))
+        return [NotebookPage(**dict(r)) for r in rows]
+
+    # ── Work Reports ──────────────────────────────────────────────
+
+    def get_work_report_data(
+        self, job_id: int,
+        date_from: str = None, date_to: str = None,
+        report_type: str = "internal"
+    ) -> dict:
+        """Aggregate labor, parts, notes, and photos for a work report."""
+        job = self.get_job_by_id(job_id)
+        if not job:
+            return {}
+
+        # Labor entries
+        labor = self.get_labor_entries_for_job(
+            job_id, date_from=date_from, date_to=date_to
+        )
+        labor_summary = self.get_labor_summary_for_job(job_id)
+
+        # Parts / billing data
+        billing = self.get_billing_data(job_id, date_from, date_to)
+
+        # Notes (all pages from this job's notebook)
+        notebook = self.get_notebook_for_job(job_id)
+        notes_pages = []
+        if notebook:
+            sections = self.get_sections(notebook.id)
+            for section in sections:
+                pages = self.get_pages(section.id)
+                for page in pages:
+                    notes_pages.append({
+                        "section": section.name,
+                        "title": page.title,
+                        "content": page.content,
+                        "photos": page.photo_list,
+                        "created_at": str(page.created_at or ""),
+                        "created_by": page.created_by_name,
+                    })
+
+        # Collect all photos from labor entries
+        labor_photos = []
+        for le in labor:
+            labor_photos.extend(le.photo_list)
+
+        # Assigned users
+        assignments = self.get_job_assignments(job_id)
+
+        result = {
+            "job": {
+                "job_number": job.job_number,
+                "name": job.name,
+                "customer": job.customer or "",
+                "address": job.address or "",
+                "status": job.status,
+                "priority": job.priority,
+                "created_at": str(job.created_at or ""),
+            },
+            "date_range": {
+                "from": date_from or "",
+                "to": date_to or "",
+            },
+            "labor": {
+                "entries": [
+                    {
+                        "user": le.user_name,
+                        "date": str(le.start_time or ""),
+                        "hours": le.hours,
+                        "category": le.sub_task_category,
+                        "description": le.description or "",
+                        "photos": le.photo_list,
+                    }
+                    for le in labor
+                ],
+                "summary": labor_summary,
+            },
+            "materials": billing.get("categories", {}),
+            "materials_subtotal": billing.get("subtotal", 0.0),
+            "notes": notes_pages,
+            "photos": labor_photos,
+            "assigned_users": [
+                {"name": a.user_name, "role": a.role}
+                for a in assignments
+            ],
+        }
+
+        # For client reports, strip internal details
+        if report_type == "client":
+            for entry in result["labor"]["entries"]:
+                entry.pop("photos", None)
+            result.pop("photos", None)
+            if "by_user" in result["labor"]["summary"]:
+                for u in result["labor"]["summary"]["by_user"]:
+                    u.pop("entries", None)
+
+        return result
+
+    # ── Hats & Permissions ─────────────────────────────────────────
+
+    def get_all_hats(self) -> list[Hat]:
+        """Get all hats ordered by id (privilege level)."""
+        rows = self.db.execute(
+            "SELECT * FROM hats ORDER BY id"
+        )
+        return [Hat(**dict(r)) for r in rows]
+
+    def get_hat_by_id(self, hat_id: int) -> Optional[Hat]:
+        rows = self.db.execute(
+            "SELECT * FROM hats WHERE id = ?", (hat_id,)
+        )
+        return Hat(**dict(rows[0])) if rows else None
+
+    def get_hat_by_name(self, name: str) -> Optional[Hat]:
+        rows = self.db.execute(
+            "SELECT * FROM hats WHERE name = ?", (name,)
+        )
+        return Hat(**dict(rows[0])) if rows else None
+
+    def create_hat(self, hat: Hat) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO hats (name, permissions, is_system) "
+                "VALUES (?, ?, ?)",
+                (hat.name, hat.permissions, hat.is_system),
+            )
+            return cursor.lastrowid
+
+    def update_hat(self, hat: Hat):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE hats SET name = ?, permissions = ?, "
+                "is_system = ? WHERE id = ?",
+                (hat.name, hat.permissions, hat.is_system, hat.id),
+            )
+
+    def update_hat_permissions(self, hat_id: int, permissions: list[str]):
+        """Update the permissions for a hat."""
+        import json
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE hats SET permissions = ? WHERE id = ?",
+                (json.dumps(permissions), hat_id),
+            )
+
+    def delete_hat(self, hat_id: int):
+        """Delete a hat (removes all user assignments too via CASCADE)."""
+        with self.db.get_connection() as conn:
+            conn.execute("DELETE FROM hats WHERE id = ?", (hat_id,))
+
+    # ── User Hat Assignments ──────────────────────────────────────
+
+    def get_user_hats(self, user_id: int) -> list[UserHat]:
+        """Get all hats assigned to a user."""
+        rows = self.db.execute("""
+            SELECT uh.*, h.name AS hat_name,
+                   u.display_name AS user_name,
+                   COALESCE(ab.display_name, '') AS assigned_by_name
+            FROM user_hats uh
+            JOIN hats h ON uh.hat_id = h.id
+            JOIN users u ON uh.user_id = u.id
+            LEFT JOIN users ab ON uh.assigned_by = ab.id
+            WHERE uh.user_id = ?
+            ORDER BY h.id
+        """, (user_id,))
+        return [UserHat(**dict(r)) for r in rows]
+
+    def get_user_hat_names(self, user_id: int) -> list[str]:
+        """Get just the hat names for a user."""
+        rows = self.db.execute("""
+            SELECT h.name
+            FROM user_hats uh
+            JOIN hats h ON uh.hat_id = h.id
+            WHERE uh.user_id = ?
+            ORDER BY h.id
+        """, (user_id,))
+        return [r["name"] for r in rows]
+
+    def assign_hat(self, user_id: int, hat_id: int,
+                   assigned_by: int = None):
+        """Assign a hat to a user."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_hats "
+                "(user_id, hat_id, assigned_by) VALUES (?, ?, ?)",
+                (user_id, hat_id, assigned_by),
+            )
+
+    def remove_hat(self, user_id: int, hat_id: int):
+        """Remove a hat from a user."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM user_hats WHERE user_id = ? AND hat_id = ?",
+                (user_id, hat_id),
+            )
+
+    def set_user_hats(self, user_id: int, hat_ids: list[int],
+                      assigned_by: int = None):
+        """Replace all of a user's hats with the given list."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM user_hats WHERE user_id = ?", (user_id,)
+            )
+            for hat_id in hat_ids:
+                conn.execute(
+                    "INSERT INTO user_hats "
+                    "(user_id, hat_id, assigned_by) VALUES (?, ?, ?)",
+                    (user_id, hat_id, assigned_by),
+                )
+
+    def get_user_permissions(self, user_id: int) -> set[str]:
+        """Get the effective permissions for a user.
+
+        A user's permissions = union of all their hats' permissions.
+        Admin and IT hats grant all permissions automatically.
+        """
+        import json
+        from wired_part.utils.constants import (
+            FULL_ACCESS_HATS, PERMISSION_KEYS,
+        )
+
+        hats = self.get_user_hats(user_id)
+        permissions = set()
+
+        for uh in hats:
+            # Full access hats get everything
+            if uh.hat_name in FULL_ACCESS_HATS:
+                return set(PERMISSION_KEYS)
+
+            hat = self.get_hat_by_id(uh.hat_id)
+            if hat:
+                permissions.update(hat.permission_list)
+
+        return permissions
+
+    def user_has_permission(self, user_id: int, permission: str) -> bool:
+        """Check if a user has a specific permission."""
+        return permission in self.get_user_permissions(user_id)
+
+    def user_has_any_full_access_hat(self, user_id: int) -> bool:
+        """Check if user has Admin or IT hat (can assign hats)."""
+        from wired_part.utils.constants import FULL_ACCESS_HATS
+        hat_names = self.get_user_hat_names(user_id)
+        return any(h in FULL_ACCESS_HATS for h in hat_names)
+
+    # ── Purchase Orders ─────────────────────────────────────────────
+
+    def generate_order_number(self) -> str:
+        """Generate next sequential PO number like PO-2026-001."""
+        from datetime import datetime
+        year = datetime.now().year
+        rows = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM purchase_orders "
+            "WHERE order_number LIKE ?",
+            (f"PO-{year}-%",),
+        )
+        count = rows[0]["cnt"] + 1 if rows else 1
+        return f"PO-{year}-{count:03d}"
+
+    def create_purchase_order(self, order: PurchaseOrder) -> int:
+        """Create a new purchase order (draft status)."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO purchase_orders "
+                "(order_number, supplier_id, parts_list_id, status, notes, "
+                "created_by, expected_delivery) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    order.order_number,
+                    order.supplier_id,
+                    order.parts_list_id,
+                    order.status,
+                    order.notes,
+                    order.created_by,
+                    order.expected_delivery,
+                ),
+            )
+            return cursor.lastrowid
+
+    def get_purchase_order_by_id(self, order_id: int) -> Optional[PurchaseOrder]:
+        """Get a single order with joined info and aggregates."""
+        rows = self.db.execute(
+            """SELECT po.*,
+                s.name AS supplier_name,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(pl.name, '') AS parts_list_name,
+                COALESCE(agg.item_count, 0) AS item_count,
+                COALESCE(agg.total_cost, 0.0) AS total_cost
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            LEFT JOIN parts_lists pl ON po.parts_list_id = pl.id
+            LEFT JOIN (
+                SELECT order_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id
+            WHERE po.id = ?""",
+            (order_id,),
+        )
+        if not rows:
+            return None
+        return PurchaseOrder(**{
+            k: rows[0][k] for k in rows[0].keys()
+            if k in PurchaseOrder.__dataclass_fields__
+        })
+
+    def get_all_purchase_orders(
+        self, status: Optional[str] = None
+    ) -> list[PurchaseOrder]:
+        """Get all orders, optionally filtered by status."""
+        query = """SELECT po.*,
+                s.name AS supplier_name,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(pl.name, '') AS parts_list_name,
+                COALESCE(agg.item_count, 0) AS item_count,
+                COALESCE(agg.total_cost, 0.0) AS total_cost
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            LEFT JOIN parts_lists pl ON po.parts_list_id = pl.id
+            LEFT JOIN (
+                SELECT order_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id"""
+        params = []
+        if status:
+            query += " WHERE po.status = ?"
+            params.append(status)
+        query += " ORDER BY po.created_at DESC"
+        rows = self.db.execute(query, tuple(params))
+        return [
+            PurchaseOrder(**{
+                k: r[k] for k in r.keys()
+                if k in PurchaseOrder.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def search_purchase_orders(self, query: str) -> list[PurchaseOrder]:
+        """Search orders by order_number, supplier name, or notes."""
+        pattern = f"%{query}%"
+        sql = """SELECT po.*,
+                s.name AS supplier_name,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(pl.name, '') AS parts_list_name,
+                COALESCE(agg.item_count, 0) AS item_count,
+                COALESCE(agg.total_cost, 0.0) AS total_cost
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            LEFT JOIN parts_lists pl ON po.parts_list_id = pl.id
+            LEFT JOIN (
+                SELECT order_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id
+            WHERE po.order_number LIKE ?
+                OR s.name LIKE ?
+                OR po.notes LIKE ?
+            ORDER BY po.created_at DESC"""
+        rows = self.db.execute(sql, (pattern, pattern, pattern))
+        return [
+            PurchaseOrder(**{
+                k: r[k] for k in r.keys()
+                if k in PurchaseOrder.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def update_purchase_order(self, order: PurchaseOrder):
+        """Update an order (only draft orders can be fully edited)."""
+        self.db.execute(
+            "UPDATE purchase_orders SET supplier_id = ?, parts_list_id = ?, "
+            "notes = ?, expected_delivery = ? WHERE id = ?",
+            (
+                order.supplier_id,
+                order.parts_list_id,
+                order.notes,
+                order.expected_delivery,
+                order.id,
+            ),
+        )
+
+    def submit_purchase_order(self, order_id: int):
+        """Transition order from draft to submitted."""
+        from datetime import datetime
+        self.db.execute(
+            "UPDATE purchase_orders SET status = 'submitted', "
+            "submitted_at = ? WHERE id = ? AND status = 'draft'",
+            (datetime.now().isoformat(), order_id),
+        )
+
+    def cancel_purchase_order(self, order_id: int):
+        """Cancel an order (only draft or submitted with no receipts)."""
+        self.db.execute(
+            "UPDATE purchase_orders SET status = 'cancelled' "
+            "WHERE id = ? AND status IN ('draft', 'submitted')",
+            (order_id,),
+        )
+
+    def close_purchase_order(self, order_id: int):
+        """Manually close an order."""
+        from datetime import datetime
+        self.db.execute(
+            "UPDATE purchase_orders SET status = 'closed', "
+            "closed_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), order_id),
+        )
+
+    def delete_purchase_order(self, order_id: int):
+        """Delete a draft order. Raises ValueError if not draft."""
+        order = self.get_purchase_order_by_id(order_id)
+        if not order:
+            raise ValueError("Order not found")
+        if order.status != "draft":
+            raise ValueError("Only draft orders can be deleted")
+        self.db.execute(
+            "DELETE FROM purchase_orders WHERE id = ?", (order_id,)
+        )
+
+    # ── Purchase Order Items ────────────────────────────────────────
+
+    def add_order_item(self, item: PurchaseOrderItem) -> int:
+        """Add a line item to an order."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO purchase_order_items "
+                "(order_id, part_id, quantity_ordered, unit_cost, notes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    item.order_id,
+                    item.part_id,
+                    item.quantity_ordered,
+                    item.unit_cost,
+                    item.notes,
+                ),
+            )
+            return cursor.lastrowid
+
+    def update_order_item(self, item: PurchaseOrderItem):
+        """Update a line item quantity, cost, or notes."""
+        self.db.execute(
+            "UPDATE purchase_order_items SET quantity_ordered = ?, "
+            "unit_cost = ?, notes = ? WHERE id = ?",
+            (item.quantity_ordered, item.unit_cost, item.notes, item.id),
+        )
+
+    def remove_order_item(self, item_id: int):
+        """Remove a line item from an order."""
+        self.db.execute(
+            "DELETE FROM purchase_order_items WHERE id = ?", (item_id,)
+        )
+
+    def get_order_items(self, order_id: int) -> list[PurchaseOrderItem]:
+        """Get all items for an order with joined part info."""
+        rows = self.db.execute(
+            """SELECT poi.*,
+                p.part_number, p.description AS part_description
+            FROM purchase_order_items poi
+            JOIN parts p ON poi.part_id = p.id
+            WHERE poi.order_id = ?
+            ORDER BY p.part_number""",
+            (order_id,),
+        )
+        return [
+            PurchaseOrderItem(**{
+                k: r[k] for k in r.keys()
+                if k in PurchaseOrderItem.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def create_order_from_parts_list(
+        self, parts_list_id: int, supplier_id: int, created_by: int
+    ) -> int:
+        """Create a PO pre-populated with items from a parts list."""
+        items = self.get_parts_list_items(parts_list_id)
+        if not items:
+            raise ValueError("Parts list has no items")
+
+        order = PurchaseOrder(
+            order_number=self.generate_order_number(),
+            supplier_id=supplier_id,
+            parts_list_id=parts_list_id,
+            status="draft",
+            created_by=created_by,
+        )
+        order_id = self.create_purchase_order(order)
+
+        for item in items:
+            # Use current unit_cost from the part
+            part = self.get_part_by_id(item.part_id)
+            oi = PurchaseOrderItem(
+                order_id=order_id,
+                part_id=item.part_id,
+                quantity_ordered=item.quantity,
+                unit_cost=part.unit_cost if part else 0.0,
+                notes=item.notes,
+            )
+            self.add_order_item(oi)
+
+        return order_id
+
+    # ── Order Receiving ─────────────────────────────────────────────
+
+    def receive_order_items(
+        self, order_id: int, receipts: list[dict], received_by: int
+    ) -> int:
+        """Receive items against an order.
+
+        Each receipt dict has:
+            order_item_id, quantity_received, allocate_to,
+            allocate_truck_id (optional), allocate_job_id (optional), notes
+
+        Returns the number of items processed.
+        """
+        count = 0
+        with self.db.get_connection() as conn:
+            for receipt in receipts:
+                item_id = receipt["order_item_id"]
+                qty = receipt["quantity_received"]
+                allocate_to = receipt.get("allocate_to", "warehouse")
+                truck_id = receipt.get("allocate_truck_id")
+                job_id = receipt.get("allocate_job_id")
+                notes = receipt.get("notes", "")
+
+                # Update the order item's received quantity
+                conn.execute(
+                    "UPDATE purchase_order_items "
+                    "SET quantity_received = quantity_received + ? "
+                    "WHERE id = ?",
+                    (qty, item_id),
+                )
+
+                # Create receive log entry
+                conn.execute(
+                    "INSERT INTO receive_log "
+                    "(order_item_id, quantity_received, allocate_to, "
+                    "allocate_truck_id, allocate_job_id, received_by, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, qty, allocate_to, truck_id, job_id,
+                     received_by, notes),
+                )
+
+                # Get the part_id for this order item
+                oi_row = conn.execute(
+                    "SELECT part_id, unit_cost FROM purchase_order_items "
+                    "WHERE id = ?",
+                    (item_id,),
+                ).fetchone()
+                part_id = oi_row["part_id"]
+                unit_cost = oi_row["unit_cost"]
+
+                # Allocate to the target
+                if allocate_to == "warehouse":
+                    conn.execute(
+                        "UPDATE parts SET quantity = quantity + ? "
+                        "WHERE id = ?",
+                        (qty, part_id),
+                    )
+                elif allocate_to == "truck" and truck_id:
+                    # Create pending truck transfer
+                    conn.execute(
+                        "INSERT INTO truck_transfers "
+                        "(truck_id, part_id, quantity, direction, status, "
+                        "created_by) VALUES (?, ?, ?, 'outbound', 'pending', ?)",
+                        (truck_id, part_id, qty, received_by),
+                    )
+                    # Also add to warehouse first (transfer will deduct)
+                    conn.execute(
+                        "UPDATE parts SET quantity = quantity + ? "
+                        "WHERE id = ?",
+                        (qty, part_id),
+                    )
+                elif allocate_to == "job" and job_id:
+                    # Add to warehouse then consume for job
+                    conn.execute(
+                        "UPDATE parts SET quantity = quantity + ? "
+                        "WHERE id = ?",
+                        (qty, part_id),
+                    )
+                    # Create/update job_parts
+                    existing = conn.execute(
+                        "SELECT id, quantity_used FROM job_parts "
+                        "WHERE job_id = ? AND part_id = ?",
+                        (job_id, part_id),
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            "UPDATE job_parts SET quantity_used = "
+                            "quantity_used + ? WHERE id = ?",
+                            (qty, existing["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO job_parts "
+                            "(job_id, part_id, quantity_used, "
+                            "unit_cost_at_use, notes) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (job_id, part_id, qty, unit_cost,
+                             "Received from PO"),
+                        )
+
+                count += 1
+
+            # Update order status based on receipt progress
+            all_items = conn.execute(
+                "SELECT quantity_ordered, quantity_received "
+                "FROM purchase_order_items WHERE order_id = ?",
+                (order_id,),
+            ).fetchall()
+
+            all_received = all(
+                r["quantity_received"] >= r["quantity_ordered"]
+                for r in all_items
+            )
+            any_received = any(
+                r["quantity_received"] > 0 for r in all_items
+            )
+
+            if all_received:
+                conn.execute(
+                    "UPDATE purchase_orders SET status = 'received' "
+                    "WHERE id = ?",
+                    (order_id,),
+                )
+            elif any_received:
+                conn.execute(
+                    "UPDATE purchase_orders SET status = 'partial' "
+                    "WHERE id = ?",
+                    (order_id,),
+                )
+
+        return count
+
+    def get_receive_log(
+        self,
+        order_id: Optional[int] = None,
+        order_item_id: Optional[int] = None,
+    ) -> list[ReceiveLogEntry]:
+        """Get receiving history with joined fields."""
+        query = """SELECT rl.*,
+                p.part_number, p.description AS part_description,
+                COALESCE(t.truck_number, '') AS truck_number,
+                COALESCE(j.job_number, '') AS job_number,
+                COALESCE(u.display_name, '') AS received_by_name
+            FROM receive_log rl
+            JOIN purchase_order_items poi ON rl.order_item_id = poi.id
+            JOIN parts p ON poi.part_id = p.id
+            LEFT JOIN trucks t ON rl.allocate_truck_id = t.id
+            LEFT JOIN jobs j ON rl.allocate_job_id = j.id
+            LEFT JOIN users u ON rl.received_by = u.id"""
+        params = []
+        conditions = []
+        if order_id:
+            conditions.append("poi.order_id = ?")
+            params.append(order_id)
+        if order_item_id:
+            conditions.append("rl.order_item_id = ?")
+            params.append(order_item_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY rl.received_at DESC"
+
+        rows = self.db.execute(query, tuple(params))
+        return [
+            ReceiveLogEntry(**{
+                k: r[k] for k in r.keys()
+                if k in ReceiveLogEntry.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_allocation_suggestions(self, part_id: int) -> list[dict]:
+        """Suggest where a received part should go.
+
+        Checks pending truck transfers, active job needs, and warehouse
+        low stock. Returns list of dicts: {target, target_id, target_name,
+        reason, priority}.
+        """
+        suggestions = []
+
+        # 1. Pending truck transfers for this part (highest priority)
+        pending = self.db.execute(
+            "SELECT tt.truck_id, t.truck_number, tt.quantity "
+            "FROM truck_transfers tt "
+            "JOIN trucks t ON tt.truck_id = t.id "
+            "WHERE tt.part_id = ? AND tt.status = 'pending' "
+            "AND tt.direction = 'outbound'",
+            (part_id,),
+        )
+        for row in pending:
+            suggestions.append({
+                "target": "truck",
+                "target_id": row["truck_id"],
+                "target_name": f"Truck {row['truck_number']}",
+                "reason": f"Pending transfer ({row['quantity']} units)",
+                "priority": 1,
+            })
+
+        # 2. Active jobs with parts_lists containing this part
+        job_needs = self.db.execute(
+            """SELECT j.id, j.job_number, j.name, pli.quantity
+            FROM parts_list_items pli
+            JOIN parts_lists pl ON pli.list_id = pl.id
+            JOIN jobs j ON pl.job_id = j.id
+            WHERE pli.part_id = ? AND j.status = 'active'""",
+            (part_id,),
+        )
+        for row in job_needs:
+            suggestions.append({
+                "target": "job",
+                "target_id": row["id"],
+                "target_name": f"{row['job_number']} — {row['name']}",
+                "reason": f"Job needs {row['quantity']} units",
+                "priority": 2,
+            })
+
+        # 3. Low warehouse stock (default)
+        part = self.get_part_by_id(part_id)
+        if part and part.is_low_stock:
+            suggestions.append({
+                "target": "warehouse",
+                "target_id": None,
+                "target_name": "Warehouse",
+                "reason": f"Low stock ({part.quantity}/{part.min_quantity})",
+                "priority": 3,
+            })
+        else:
+            suggestions.append({
+                "target": "warehouse",
+                "target_id": None,
+                "target_name": "Warehouse",
+                "reason": "Default allocation",
+                "priority": 4,
+            })
+
+        suggestions.sort(key=lambda s: s["priority"])
+        return suggestions
+
+    def get_order_receive_summary(self, order_id: int) -> dict:
+        """Get summary of receiving status for an order."""
+        rows = self.db.execute(
+            "SELECT COUNT(*) as total_items, "
+            "SUM(quantity_ordered) as total_ordered, "
+            "SUM(quantity_received) as total_received, "
+            "SUM(quantity_ordered * unit_cost) as total_cost "
+            "FROM purchase_order_items WHERE order_id = ?",
+            (order_id,),
+        )
+        if not rows:
+            return {
+                "total_items": 0, "total_ordered": 0,
+                "total_received": 0, "total_cost": 0.0,
+            }
+        r = rows[0]
+        return {
+            "total_items": r["total_items"] or 0,
+            "total_ordered": r["total_ordered"] or 0,
+            "total_received": r["total_received"] or 0,
+            "total_cost": r["total_cost"] or 0.0,
+        }
+
+    # ── Return Authorizations ──────────────────────────────────────
+
+    def generate_ra_number(self) -> str:
+        """Generate next sequential RA number like RA-2026-001."""
+        from datetime import datetime
+        year = datetime.now().year
+        rows = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM return_authorizations "
+            "WHERE ra_number LIKE ?",
+            (f"RA-{year}-%",),
+        )
+        count = rows[0]["cnt"] + 1 if rows else 1
+        return f"RA-{year}-{count:03d}"
+
+    def create_return_authorization(
+        self, ra: ReturnAuthorization, items: list[ReturnAuthorizationItem]
+    ) -> int:
+        """Create a return authorization with items.
+
+        Deducts returned quantities from warehouse inventory immediately.
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO return_authorizations "
+                "(ra_number, order_id, supplier_id, status, reason, "
+                "notes, created_by, credit_amount) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ra.ra_number,
+                    ra.order_id,
+                    ra.supplier_id,
+                    ra.status,
+                    ra.reason,
+                    ra.notes,
+                    ra.created_by,
+                    ra.credit_amount,
+                ),
+            )
+            ra_id = cursor.lastrowid
+
+            for item in items:
+                conn.execute(
+                    "INSERT INTO return_authorization_items "
+                    "(ra_id, part_id, quantity, unit_cost, reason) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ra_id, item.part_id, item.quantity,
+                     item.unit_cost, item.reason),
+                )
+                # Deduct from warehouse
+                conn.execute(
+                    "UPDATE parts SET quantity = MAX(0, quantity - ?) "
+                    "WHERE id = ?",
+                    (item.quantity, item.part_id),
+                )
+
+            return ra_id
+
+    def get_return_authorization_by_id(
+        self, ra_id: int
+    ) -> Optional[ReturnAuthorization]:
+        """Get an RA with joined supplier/order/user info."""
+        rows = self.db.execute(
+            """SELECT ra.*,
+                s.name AS supplier_name,
+                COALESCE(po.order_number, '') AS order_number,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(agg.item_count, 0) AS item_count
+            FROM return_authorizations ra
+            JOIN suppliers s ON ra.supplier_id = s.id
+            LEFT JOIN purchase_orders po ON ra.order_id = po.id
+            LEFT JOIN users u ON ra.created_by = u.id
+            LEFT JOIN (
+                SELECT ra_id, COUNT(*) AS item_count
+                FROM return_authorization_items
+                GROUP BY ra_id
+            ) agg ON agg.ra_id = ra.id
+            WHERE ra.id = ?""",
+            (ra_id,),
+        )
+        if not rows:
+            return None
+        return ReturnAuthorization(**{
+            k: rows[0][k] for k in rows[0].keys()
+            if k in ReturnAuthorization.__dataclass_fields__
+        })
+
+    def get_all_return_authorizations(
+        self, status: Optional[str] = None
+    ) -> list[ReturnAuthorization]:
+        """Get all RAs, optionally filtered by status."""
+        query = """SELECT ra.*,
+                s.name AS supplier_name,
+                COALESCE(po.order_number, '') AS order_number,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(agg.item_count, 0) AS item_count
+            FROM return_authorizations ra
+            JOIN suppliers s ON ra.supplier_id = s.id
+            LEFT JOIN purchase_orders po ON ra.order_id = po.id
+            LEFT JOIN users u ON ra.created_by = u.id
+            LEFT JOIN (
+                SELECT ra_id, COUNT(*) AS item_count
+                FROM return_authorization_items
+                GROUP BY ra_id
+            ) agg ON agg.ra_id = ra.id"""
+        params = []
+        if status:
+            query += " WHERE ra.status = ?"
+            params.append(status)
+        query += " ORDER BY ra.created_at DESC"
+        rows = self.db.execute(query, tuple(params))
+        return [
+            ReturnAuthorization(**{
+                k: r[k] for k in r.keys()
+                if k in ReturnAuthorization.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_return_items(self, ra_id: int) -> list[ReturnAuthorizationItem]:
+        """Get items for a return with joined part info."""
+        rows = self.db.execute(
+            """SELECT rai.*,
+                p.part_number, p.description AS part_description
+            FROM return_authorization_items rai
+            JOIN parts p ON rai.part_id = p.id
+            WHERE rai.ra_id = ?
+            ORDER BY p.part_number""",
+            (ra_id,),
+        )
+        return [
+            ReturnAuthorizationItem(**{
+                k: r[k] for k in r.keys()
+                if k in ReturnAuthorizationItem.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def update_return_status(
+        self, ra_id: int, new_status: str,
+        credit_amount: Optional[float] = None
+    ):
+        """Transition RA status with appropriate timestamps."""
+        from datetime import datetime
+        now = datetime.now().isoformat()
+
+        if new_status == "picked_up":
+            self.db.execute(
+                "UPDATE return_authorizations SET status = ?, "
+                "picked_up_at = ? WHERE id = ?",
+                (new_status, now, ra_id),
+            )
+        elif new_status == "credit_received":
+            params = [new_status, now]
+            set_clause = "status = ?, credit_received_at = ?"
+            if credit_amount is not None:
+                set_clause += ", credit_amount = ?"
+                params.append(credit_amount)
+            params.append(ra_id)
+            self.db.execute(
+                f"UPDATE return_authorizations SET {set_clause} "
+                f"WHERE id = ?",
+                tuple(params),
+            )
+        else:
+            self.db.execute(
+                "UPDATE return_authorizations SET status = ? "
+                "WHERE id = ?",
+                (new_status, ra_id),
+            )
+
+    def delete_return_authorization(self, ra_id: int):
+        """Delete an RA (only if initiated). Restores inventory."""
+        ra = self.get_return_authorization_by_id(ra_id)
+        if not ra:
+            raise ValueError("Return authorization not found")
+        if ra.status != "initiated":
+            raise ValueError("Only initiated returns can be deleted")
+
+        with self.db.get_connection() as conn:
+            # Restore inventory for each item
+            items = conn.execute(
+                "SELECT part_id, quantity FROM return_authorization_items "
+                "WHERE ra_id = ?",
+                (ra_id,),
+            ).fetchall()
+            for item in items:
+                conn.execute(
+                    "UPDATE parts SET quantity = quantity + ? "
+                    "WHERE id = ?",
+                    (item["quantity"], item["part_id"]),
+                )
+            conn.execute(
+                "DELETE FROM return_authorizations WHERE id = ?",
+                (ra_id,),
+            )
+
+    # ── Order Analytics ─────────────────────────────────────────────
+
+    def get_order_analytics(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> dict:
+        """Get order analytics: total spent, avg order size, etc."""
+        conditions = []
+        params = []
+        if date_from:
+            conditions.append("po.created_at >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("po.created_at <= ?")
+            params.append(date_to)
+
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        # Total orders and spending
+        rows = self.db.execute(
+            f"""SELECT COUNT(*) as total_orders,
+                COALESCE(SUM(agg.total_cost), 0) AS total_spent,
+                COALESCE(AVG(agg.total_cost), 0) AS avg_order_size
+            FROM purchase_orders po
+            LEFT JOIN (
+                SELECT order_id,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id
+            {where}""",
+            tuple(params),
+        )
+        result = {
+            "total_orders": rows[0]["total_orders"] if rows else 0,
+            "total_spent": rows[0]["total_spent"] if rows else 0.0,
+            "avg_order_size": rows[0]["avg_order_size"] if rows else 0.0,
+        }
+
+        # Orders by status
+        status_rows = self.db.execute(
+            f"SELECT status, COUNT(*) as cnt "
+            f"FROM purchase_orders po {where} GROUP BY status",
+            tuple(params),
+        )
+        result["by_status"] = {
+            r["status"]: r["cnt"] for r in status_rows
+        }
+
+        # Top supplier
+        supplier_rows = self.db.execute(
+            f"""SELECT s.name, COUNT(*) as order_count
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            {where}
+            GROUP BY po.supplier_id
+            ORDER BY order_count DESC
+            LIMIT 1""",
+            tuple(params),
+        )
+        result["top_supplier"] = (
+            supplier_rows[0]["name"] if supplier_rows else "N/A"
+        )
+
+        # Return rate
+        total_returns = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM return_authorizations"
+        )
+        result["total_returns"] = (
+            total_returns[0]["cnt"] if total_returns else 0
+        )
+
+        return result
+
+    def get_supplier_order_history(
+        self, supplier_id: int
+    ) -> list[PurchaseOrder]:
+        """Get all orders for a specific supplier."""
+        rows = self.db.execute(
+            """SELECT po.*,
+                s.name AS supplier_name,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(pl.name, '') AS parts_list_name,
+                COALESCE(agg.item_count, 0) AS item_count,
+                COALESCE(agg.total_cost, 0.0) AS total_cost
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            LEFT JOIN parts_lists pl ON po.parts_list_id = pl.id
+            LEFT JOIN (
+                SELECT order_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id
+            WHERE po.supplier_id = ?
+            ORDER BY po.created_at DESC""",
+            (supplier_id,),
+        )
+        return [
+            PurchaseOrder(**{
+                k: r[k] for k in r.keys()
+                if k in PurchaseOrder.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_orders_summary(self) -> dict:
+        """Quick summary for dashboard display."""
+        pending = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM purchase_orders "
+            "WHERE status IN ('submitted', 'partial')"
+        )
+        draft = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM purchase_orders "
+            "WHERE status = 'draft'"
+        )
+        # Items awaiting receipt
+        awaiting = self.db.execute(
+            "SELECT COALESCE(SUM(quantity_ordered - quantity_received), 0) "
+            "as cnt FROM purchase_order_items poi "
+            "JOIN purchase_orders po ON poi.order_id = po.id "
+            "WHERE po.status IN ('submitted', 'partial') "
+            "AND poi.quantity_received < poi.quantity_ordered"
+        )
+        open_returns = self.db.execute(
+            "SELECT COUNT(*) as cnt FROM return_authorizations "
+            "WHERE status IN ('initiated', 'picked_up')"
+        )
+        return {
+            "pending_orders": pending[0]["cnt"] if pending else 0,
+            "draft_orders": draft[0]["cnt"] if draft else 0,
+            "items_awaiting": awaiting[0]["cnt"] if awaiting else 0,
+            "open_returns": open_returns[0]["cnt"] if open_returns else 0,
         }

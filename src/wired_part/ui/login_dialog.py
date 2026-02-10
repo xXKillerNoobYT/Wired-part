@@ -220,6 +220,10 @@ class FirstRunDialog(QDialog):
         try:
             user_id = self.repo.create_user(user)
             user.id = user_id
+            # Auto-assign Admin hat to the first user
+            admin_hat = self.repo.get_hat_by_name("Admin")
+            if admin_hat:
+                self.repo.assign_hat(user_id, admin_hat.id)
             self.created_user = user
             self.accept()
         except Exception as e:

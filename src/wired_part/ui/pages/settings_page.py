@@ -4,12 +4,17 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -91,6 +96,11 @@ class SettingsPage(QWidget):
         self._setup_users_tab()
         self.sub_tabs.addTab(self.users_widget, "Users")
 
+        # Hats tab
+        self.hats_widget = QWidget()
+        self._setup_hats_tab()
+        self.sub_tabs.addTab(self.hats_widget, "Hats & Permissions")
+
         # Categories tab
         self.categories_widget = QWidget()
         self._setup_categories_tab()
@@ -110,6 +120,16 @@ class SettingsPage(QWidget):
         self.agent_config_widget = QWidget()
         self._setup_agent_config_tab()
         self.sub_tabs.addTab(self.agent_config_widget, "Agent Config")
+
+        # Labor tab
+        self.labor_widget = QWidget()
+        self._setup_labor_tab()
+        self.sub_tabs.addTab(self.labor_widget, "Labor")
+
+        # Notebook tab
+        self.notebook_widget = QWidget()
+        self._setup_notebook_tab()
+        self.sub_tabs.addTab(self.notebook_widget, "Notebook")
 
         # General tab
         self.general_widget = QWidget()
@@ -135,9 +155,9 @@ class SettingsPage(QWidget):
         layout.addLayout(toolbar)
 
         self.users_table = QTableWidget()
-        self.users_table.setColumnCount(5)
+        self.users_table.setColumnCount(6)
         self.users_table.setHorizontalHeaderLabels(
-            ["ID", "Username", "Display Name", "Role", "Active"]
+            ["ID", "Username", "Display Name", "Hats", "Role", "Active"]
         )
         self.users_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.users_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -155,9 +175,13 @@ class SettingsPage(QWidget):
             self.users_table.setItem(
                 row, 2, QTableWidgetItem(user.display_name)
             )
-            self.users_table.setItem(row, 3, QTableWidgetItem(user.role))
+            # Show hats
+            hat_names = self.repo.get_user_hat_names(user.id)
+            hats_text = ", ".join(hat_names) if hat_names else "(none)"
+            self.users_table.setItem(row, 3, QTableWidgetItem(hats_text))
+            self.users_table.setItem(row, 4, QTableWidgetItem(user.role))
             active_text = "Yes" if user.is_active else "No"
-            self.users_table.setItem(row, 4, QTableWidgetItem(active_text))
+            self.users_table.setItem(row, 5, QTableWidgetItem(active_text))
 
     def _get_selected_user_id(self):
         row = self.users_table.currentRow()
@@ -167,7 +191,9 @@ class SettingsPage(QWidget):
 
     def _add_user(self):
         from wired_part.ui.dialogs.user_dialog import UserDialog
-        dlg = UserDialog(self.repo, parent=self)
+        dlg = UserDialog(
+            self.repo, current_user=self.current_user, parent=self
+        )
         if dlg.exec() == UserDialog.Accepted:
             self._refresh_users()
 
@@ -178,7 +204,10 @@ class SettingsPage(QWidget):
             return
         user = self.repo.get_user_by_id(uid)
         from wired_part.ui.dialogs.user_dialog import UserDialog
-        dlg = UserDialog(self.repo, user=user, parent=self)
+        dlg = UserDialog(
+            self.repo, user=user,
+            current_user=self.current_user, parent=self,
+        )
         if dlg.exec() == UserDialog.Accepted:
             self._refresh_users()
 
@@ -198,6 +227,174 @@ class SettingsPage(QWidget):
         if reply == QMessageBox.Yes:
             self.repo.deactivate_user(uid)
             self._refresh_users()
+
+    # ── Hats & Permissions Tab ────────────────────────────────────
+
+    def _setup_hats_tab(self):
+        """Configure hat roles and their permissions."""
+        layout = QVBoxLayout(self.hats_widget)
+
+        from wired_part.utils.constants import (
+            FULL_ACCESS_HATS,
+            PERMISSION_GROUPS,
+            PERMISSION_LABELS,
+        )
+
+        layout.addWidget(QLabel(
+            "Hats define what each user can see and do in the application.\n"
+            "Select a hat on the left to view and edit its permissions."
+        ))
+
+        # ── Hat selector and permission editor side by side ─────
+        from PySide6.QtWidgets import QSplitter, QScrollArea
+
+        splitter = QSplitter()
+
+        # Left: Hat list
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        left_header = QLabel("Hats")
+        left_header.setStyleSheet("font-weight: bold; font-size: 12px;")
+        left_layout.addWidget(left_header)
+
+        self.hats_list = QListWidget()
+        self.hats_list.currentRowChanged.connect(self._on_hat_selected)
+        left_layout.addWidget(self.hats_list)
+
+        splitter.addWidget(left)
+
+        # Right: Permissions
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(4, 0, 0, 0)
+
+        self.hat_name_label = QLabel("Select a hat")
+        self.hat_name_label.setStyleSheet(
+            "font-weight: bold; font-size: 14px;"
+        )
+        right_layout.addWidget(self.hat_name_label)
+
+        self.hat_info_label = QLabel("")
+        self.hat_info_label.setStyleSheet("color: #a6adc8;")
+        right_layout.addWidget(self.hat_info_label)
+
+        # Scrollable permissions area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        perms_container = QWidget()
+        self.perms_layout = QVBoxLayout(perms_container)
+        self.perms_layout.setContentsMargins(0, 0, 0, 0)
+        self._perm_checkboxes: dict[str, QCheckBox] = {}
+
+        for group_name, keys in PERMISSION_GROUPS.items():
+            group_box = QGroupBox(group_name)
+            group_layout = QVBoxLayout()
+            for key in keys:
+                label = PERMISSION_LABELS.get(key, key)
+                cb = QCheckBox(label)
+                cb.setProperty("perm_key", key)
+                self._perm_checkboxes[key] = cb
+                group_layout.addWidget(cb)
+            group_box.setLayout(group_layout)
+            self.perms_layout.addWidget(group_box)
+
+        self.perms_layout.addStretch()
+        scroll.setWidget(perms_container)
+        right_layout.addWidget(scroll)
+
+        # Save permissions button
+        self.save_perms_btn = QPushButton("Save Permissions")
+        self.save_perms_btn.setMinimumHeight(34)
+        self.save_perms_btn.clicked.connect(self._save_hat_permissions)
+        self.save_perms_btn.setEnabled(False)
+        right_layout.addWidget(self.save_perms_btn)
+
+        self.hat_perm_status = QLabel("")
+        self.hat_perm_status.setWordWrap(True)
+        right_layout.addWidget(self.hat_perm_status)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter)
+
+    def _refresh_hats(self):
+        """Reload the hats list."""
+        self.hats_list.clear()
+        hats = self.repo.get_all_hats()
+        for hat in hats:
+            self.hats_list.addItem(hat.name)
+            # Store hat id in the item
+            item = self.hats_list.item(self.hats_list.count() - 1)
+            item.setData(Qt.ItemDataRole.UserRole, hat.id)
+
+    def _on_hat_selected(self, row: int):
+        """Load permissions for the selected hat."""
+        from wired_part.utils.constants import FULL_ACCESS_HATS
+
+        if row < 0:
+            self.hat_name_label.setText("Select a hat")
+            self.hat_info_label.setText("")
+            self.save_perms_btn.setEnabled(False)
+            return
+
+        item = self.hats_list.item(row)
+        hat_id = item.data(Qt.ItemDataRole.UserRole)
+        hat = self.repo.get_hat_by_id(hat_id)
+        if not hat:
+            return
+
+        self.hat_name_label.setText(f"{hat.name}")
+        is_full = hat.name in FULL_ACCESS_HATS
+
+        if is_full:
+            self.hat_info_label.setText(
+                "Full access — all permissions granted automatically."
+            )
+            self.hat_info_label.setStyleSheet("color: #a6e3a1;")
+        else:
+            self.hat_info_label.setText(
+                "Customize which permissions this hat grants."
+            )
+            self.hat_info_label.setStyleSheet("color: #a6adc8;")
+
+        # Load current permissions
+        current_perms = set(hat.permission_list)
+        for key, cb in self._perm_checkboxes.items():
+            cb.blockSignals(True)
+            if is_full:
+                cb.setChecked(True)
+                cb.setEnabled(False)
+            else:
+                cb.setChecked(key in current_perms)
+                cb.setEnabled(True)
+            cb.blockSignals(False)
+
+        self.save_perms_btn.setEnabled(not is_full)
+
+    def _save_hat_permissions(self):
+        """Save the edited permissions for the selected hat."""
+        row = self.hats_list.currentRow()
+        if row < 0:
+            return
+
+        item = self.hats_list.item(row)
+        hat_id = item.data(Qt.ItemDataRole.UserRole)
+
+        perms = [
+            key for key, cb in self._perm_checkboxes.items()
+            if cb.isChecked()
+        ]
+
+        self.repo.update_hat_permissions(hat_id, perms)
+        self.hat_perm_status.setText(
+            f"Permissions saved for {item.text()} "
+            f"({len(perms)} permissions granted)."
+        )
+        self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
 
     # ── Categories Tab ──────────────────────────────────────────
 
@@ -687,6 +884,279 @@ class SettingsPage(QWidget):
         )
         self.agent_config_status.setStyleSheet("color: #a6e3a1;")
 
+    # ── Labor Tab ──────────────────────────────────────────────
+
+    def _setup_labor_tab(self):
+        layout = QVBoxLayout(self.labor_widget)
+
+        from wired_part.config import Config
+
+        settings_group = QGroupBox("Labor Tracking Settings")
+        form = QFormLayout()
+
+        self.labor_rate_spin = QDoubleSpinBox()
+        self.labor_rate_spin.setRange(0.0, 999.99)
+        self.labor_rate_spin.setDecimals(2)
+        self.labor_rate_spin.setValue(Config.DEFAULT_LABOR_RATE)
+        self.labor_rate_spin.setPrefix("$ ")
+        self.labor_rate_spin.setSuffix(" / hr")
+        self.labor_rate_spin.setToolTip(
+            "Default hourly rate pre-filled when clocking in"
+        )
+        form.addRow("Default Labor Rate:", self.labor_rate_spin)
+
+        self.geofence_spin = QDoubleSpinBox()
+        self.geofence_spin.setRange(0.01, 50.0)
+        self.geofence_spin.setDecimals(2)
+        self.geofence_spin.setValue(Config.GEOFENCE_RADIUS)
+        self.geofence_spin.setSuffix(" miles")
+        self.geofence_spin.setToolTip(
+            "Maximum distance from job site for clock-in/out "
+            "before a warning is shown"
+        )
+        form.addRow("Geofence Radius:", self.geofence_spin)
+
+        self.overtime_spin = QDoubleSpinBox()
+        self.overtime_spin.setRange(1.0, 24.0)
+        self.overtime_spin.setDecimals(1)
+        self.overtime_spin.setValue(Config.OVERTIME_THRESHOLD)
+        self.overtime_spin.setSuffix(" hours")
+        self.overtime_spin.setToolTip(
+            "Entries exceeding this many hours are flagged as overtime"
+        )
+        form.addRow("Overtime Threshold:", self.overtime_spin)
+
+        # Photos directory with browse button
+        photos_row = QHBoxLayout()
+        self.photos_dir_input = QLineEdit(Config.PHOTOS_DIRECTORY)
+        self.photos_dir_input.setPlaceholderText("Path to photos directory")
+        self.photos_dir_input.setToolTip(
+            "Directory where labor and notebook photos are stored"
+        )
+        photos_row.addWidget(self.photos_dir_input, 1)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_photos_dir)
+        photos_row.addWidget(browse_btn)
+
+        form.addRow("Photos Directory:", photos_row)
+
+        settings_group.setLayout(form)
+        layout.addWidget(settings_group)
+
+        # Save button
+        save_btn = QPushButton("Save Labor Settings")
+        save_btn.setMinimumHeight(34)
+        save_btn.clicked.connect(self._save_labor_config)
+        layout.addWidget(save_btn)
+
+        self.labor_status = QLabel("")
+        self.labor_status.setWordWrap(True)
+        layout.addWidget(self.labor_status)
+
+        # Description
+        desc_group = QGroupBox("About Labor Tracking")
+        desc_layout = QVBoxLayout()
+        desc_layout.addWidget(QLabel(
+            "Configure defaults for the labor tracking system.\n\n"
+            "Default Labor Rate: Pre-filled rate when clocking in. "
+            "Can be overridden per entry.\n\n"
+            "Geofence Radius: When GPS coordinates are provided during "
+            "clock-in/out, the system checks if the worker is within "
+            "this radius of the job site. A warning is shown if outside "
+            "the radius, but the action is still allowed.\n\n"
+            "Overtime Threshold: Entries with hours exceeding this value "
+            "are highlighted and flagged as overtime in reports.\n\n"
+            "Photos Directory: Where photos attached to labor entries "
+            "and notebook pages are stored on disk."
+        ))
+        desc_group.setLayout(desc_layout)
+        layout.addWidget(desc_group)
+
+        layout.addStretch()
+
+    def _browse_photos_dir(self):
+        """Open a directory picker for the photos directory."""
+        current = self.photos_dir_input.text().strip()
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Photos Directory", current
+        )
+        if directory:
+            self.photos_dir_input.setText(directory)
+
+    def _save_labor_config(self):
+        from wired_part.config import Config
+
+        rate = self.labor_rate_spin.value()
+        radius = self.geofence_spin.value()
+        photos_dir = self.photos_dir_input.text().strip()
+        overtime = self.overtime_spin.value()
+
+        if not photos_dir:
+            self.labor_status.setText("Photos directory cannot be empty.")
+            self.labor_status.setStyleSheet("color: #f38ba8;")
+            return
+
+        Config.update_labor_settings(rate, radius, photos_dir, overtime)
+        self.labor_status.setText("Labor settings saved successfully.")
+        self.labor_status.setStyleSheet("color: #a6e3a1;")
+
+    # ── Notebook Tab ─────────────────────────────────────────────
+
+    def _setup_notebook_tab(self):
+        """Configure default notebook sections template for new jobs."""
+        layout = QVBoxLayout(self.notebook_widget)
+
+        from wired_part.config import Config
+
+        template_group = QGroupBox("Default Sections for New Job Notebooks")
+        tpl_layout = QVBoxLayout()
+
+        tpl_layout.addWidget(QLabel(
+            "Configure which sections are automatically created when\n"
+            "a new job notebook is created. The 'Daily Logs' section\n"
+            "is always locked and cannot be renamed or deleted."
+        ))
+
+        self.sections_list = QListWidget()
+        self.sections_list.setMinimumHeight(160)
+        self.sections_list.setToolTip(
+            "Drag to reorder, or use Move Up/Down buttons"
+        )
+        tpl_layout.addWidget(self.sections_list)
+
+        # Load current template
+        for section in Config.get_notebook_sections():
+            item = QListWidgetItem(section)
+            self.sections_list.addItem(item)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        add_btn = QPushButton("+ Add Section")
+        add_btn.setToolTip("Add a new section to the template")
+        add_btn.clicked.connect(self._on_add_template_section)
+        btn_row.addWidget(add_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Remove selected section from the template")
+        remove_btn.clicked.connect(self._on_remove_template_section)
+        btn_row.addWidget(remove_btn)
+
+        up_btn = QPushButton("Move Up")
+        up_btn.setToolTip("Move selected section up")
+        up_btn.clicked.connect(self._on_move_section_up)
+        btn_row.addWidget(up_btn)
+
+        down_btn = QPushButton("Move Down")
+        down_btn.setToolTip("Move selected section down")
+        down_btn.clicked.connect(self._on_move_section_down)
+        btn_row.addWidget(down_btn)
+
+        btn_row.addStretch()
+        tpl_layout.addLayout(btn_row)
+
+        template_group.setLayout(tpl_layout)
+        layout.addWidget(template_group)
+
+        # Save / Reset
+        action_row = QHBoxLayout()
+        save_tpl_btn = QPushButton("Save Template")
+        save_tpl_btn.setMinimumHeight(34)
+        save_tpl_btn.clicked.connect(self._save_notebook_template)
+        action_row.addWidget(save_tpl_btn)
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setToolTip("Restore the default sections template")
+        reset_btn.clicked.connect(self._reset_notebook_template)
+        action_row.addWidget(reset_btn)
+        layout.addLayout(action_row)
+
+        self.notebook_status = QLabel("")
+        self.notebook_status.setWordWrap(True)
+        layout.addWidget(self.notebook_status)
+
+        layout.addStretch()
+
+    def _on_add_template_section(self):
+        """Add a new section to the notebook template."""
+        name, ok = QInputDialog.getText(
+            self, "New Section", "Section name:"
+        )
+        if ok and name.strip():
+            self.sections_list.addItem(name.strip())
+
+    def _on_remove_template_section(self):
+        """Remove the selected section from the template."""
+        row = self.sections_list.currentRow()
+        if row < 0:
+            return
+        item = self.sections_list.item(row)
+        if item.text() == "Daily Logs":
+            QMessageBox.information(
+                self, "Locked Section",
+                "'Daily Logs' is locked and cannot be removed.",
+            )
+            return
+        self.sections_list.takeItem(row)
+
+    def _on_move_section_up(self):
+        """Move the selected section up in the list."""
+        row = self.sections_list.currentRow()
+        if row > 0:
+            item = self.sections_list.takeItem(row)
+            self.sections_list.insertItem(row - 1, item)
+            self.sections_list.setCurrentRow(row - 1)
+
+    def _on_move_section_down(self):
+        """Move the selected section down in the list."""
+        row = self.sections_list.currentRow()
+        if row < self.sections_list.count() - 1:
+            item = self.sections_list.takeItem(row)
+            self.sections_list.insertItem(row + 1, item)
+            self.sections_list.setCurrentRow(row + 1)
+
+    def _save_notebook_template(self):
+        """Save the current section template to settings."""
+        from wired_part.config import Config
+
+        sections = []
+        for i in range(self.sections_list.count()):
+            sections.append(self.sections_list.item(i).text())
+
+        if not sections:
+            self.notebook_status.setText(
+                "Template must have at least one section."
+            )
+            self.notebook_status.setStyleSheet("color: #f38ba8;")
+            return
+
+        # Ensure Daily Logs is always present
+        if "Daily Logs" not in sections:
+            sections.insert(0, "Daily Logs")
+            self.sections_list.clear()
+            for s in sections:
+                self.sections_list.addItem(s)
+
+        Config.update_notebook_template(sections)
+        self.notebook_status.setText(
+            f"Template saved with {len(sections)} sections. "
+            "New jobs will use this template."
+        )
+        self.notebook_status.setStyleSheet("color: #a6e3a1;")
+
+    def _reset_notebook_template(self):
+        """Reset the template to default sections."""
+        from wired_part.config import Config
+        from wired_part.utils.constants import DEFAULT_NOTEBOOK_SECTIONS
+
+        Config.update_notebook_template(list(DEFAULT_NOTEBOOK_SECTIONS))
+        self.sections_list.clear()
+        for s in DEFAULT_NOTEBOOK_SECTIONS:
+            self.sections_list.addItem(s)
+        self.notebook_status.setText("Template reset to defaults.")
+        self.notebook_status.setStyleSheet("color: #a6e3a1;")
+
     # ── General Tab ─────────────────────────────────────────────
 
     def _setup_general_tab(self):
@@ -735,5 +1205,6 @@ class SettingsPage(QWidget):
 
     def refresh(self):
         self._refresh_users()
+        self._refresh_hats()
         self._refresh_categories()
         self._refresh_suppliers()

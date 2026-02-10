@@ -63,6 +63,11 @@ class InventoryPage(QWidget):
         self.export_btn.clicked.connect(self._on_export)
         toolbar.addWidget(self.export_btn)
 
+        self.lists_btn = QPushButton("Parts Lists")
+        self.lists_btn.setToolTip("Manage parts lists (general, job-specific, quick pick)")
+        self.lists_btn.clicked.connect(self._on_parts_lists)
+        toolbar.addWidget(self.lists_btn)
+
         self.edit_btn = QPushButton("Edit")
         self.edit_btn.clicked.connect(self._on_edit)
         self.edit_btn.setEnabled(False)
@@ -182,6 +187,14 @@ class InventoryPage(QWidget):
         from wired_part.ui.dialogs.export_dialog import ExportDialog
         dialog = ExportDialog(self.repo, parent=self)
         dialog.exec()
+
+    def _on_parts_lists(self):
+        from wired_part.ui.dialogs.parts_list_manager_dialog import (
+            PartsListManagerDialog,
+        )
+        dialog = PartsListManagerDialog(self.repo, parent=self)
+        dialog.exec()
+        self.refresh()
 
     def _on_add(self):
         from wired_part.ui.dialogs.part_dialog import PartDialog

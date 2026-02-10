@@ -31,6 +31,9 @@ class ToolHandler:
             "create_notification": self._create_notification,
             "get_jobs_without_users": self._get_jobs_without_users,
             "get_consumption_log": self._get_consumption_log,
+            "get_labor_summary": self._get_labor_summary,
+            "get_active_clockins": self._get_active_clockins,
+            "search_notes": self._search_notes,
         }
 
         handler = dispatch.get(tool_name)
@@ -230,3 +233,53 @@ class ToolHandler:
             }
             for cl in logs[:20]  # Limit to last 20
         ]
+
+    def _get_labor_summary(self, job_number: str = "") -> dict:
+        job = self.repo.get_job_by_number(job_number)
+        if not job:
+            return {"error": f"Job '{job_number}' not found"}
+        summary = self.repo.get_labor_summary_for_job(job.id)
+        return {
+            "job_number": job.job_number,
+            "job_name": job.name,
+            "total_hours": summary.get("total_hours", 0),
+            "total_cost": format_currency(summary.get("total_cost", 0)),
+            "entry_count": summary.get("entry_count", 0),
+            "by_category": summary.get("by_category", []),
+            "by_user": summary.get("by_user", []),
+        }
+
+    def _get_active_clockins(self) -> list[dict]:
+        users = self.repo.get_all_users(active_only=True)
+        active = []
+        for user in users:
+            entry = self.repo.get_active_clock_in(user.id)
+            if entry:
+                active.append({
+                    "user": user.display_name,
+                    "job_number": entry.job_number or "N/A",
+                    "category": entry.sub_task_category,
+                    "since": str(entry.start_time or ""),
+                    "rate": format_currency(entry.rate_per_hour),
+                })
+        return active
+
+    def _search_notes(self, query: str = "") -> list[dict]:
+        if not query:
+            return []
+        import re
+        pages = self.repo.search_notebook_pages(query)
+        results = []
+        for page in pages[:15]:  # Limit results
+            # Strip HTML for snippet
+            content = page.content or ""
+            text = re.sub(r"<[^>]+>", " ", content)
+            text = re.sub(r"\s+", " ", text).strip()
+            results.append({
+                "title": page.title,
+                "section": page.section_name or "",
+                "created_by": page.created_by_name or "",
+                "snippet": text[:200] if text else "",
+                "updated_at": str(page.updated_at or ""),
+            })
+        return results

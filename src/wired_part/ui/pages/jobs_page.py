@@ -184,6 +184,39 @@ class JobsPage(QWidget):
         users_group.setLayout(users_layout)
         layout.addWidget(users_group)
 
+        # Labor tracking
+        labor_group = QGroupBox("Labor Tracking")
+        labor_layout = QVBoxLayout()
+
+        self.labor_summary_label = QLabel("No labor entries")
+        self.labor_summary_label.setWordWrap(True)
+        labor_layout.addWidget(self.labor_summary_label)
+
+        labor_btns = QHBoxLayout()
+        self.clock_in_btn = QPushButton("Clock In")
+        self.clock_in_btn.clicked.connect(self._on_clock_in)
+        self.clock_in_btn.setEnabled(False)
+        labor_btns.addWidget(self.clock_in_btn)
+
+        self.clock_out_btn = QPushButton("Clock Out")
+        self.clock_out_btn.clicked.connect(self._on_clock_out)
+        self.clock_out_btn.setEnabled(False)
+        labor_btns.addWidget(self.clock_out_btn)
+
+        self.manual_entry_btn = QPushButton("Manual Entry")
+        self.manual_entry_btn.clicked.connect(self._on_manual_entry)
+        self.manual_entry_btn.setEnabled(False)
+        labor_btns.addWidget(self.manual_entry_btn)
+
+        self.view_labor_btn = QPushButton("View All")
+        self.view_labor_btn.clicked.connect(self._on_view_labor)
+        self.view_labor_btn.setEnabled(False)
+        labor_btns.addWidget(self.view_labor_btn)
+
+        labor_layout.addLayout(labor_btns)
+        labor_group.setLayout(labor_layout)
+        layout.addWidget(labor_group)
+
         # Job action buttons
         action_btns = QHBoxLayout()
         self.edit_btn = QPushButton("Edit")
@@ -205,6 +238,16 @@ class JobsPage(QWidget):
         self.billing_btn.clicked.connect(self._on_billing)
         self.billing_btn.setEnabled(False)
         action_btns.addWidget(self.billing_btn)
+
+        self.notes_btn = QPushButton("Notes")
+        self.notes_btn.clicked.connect(self._on_notes)
+        self.notes_btn.setEnabled(False)
+        action_btns.addWidget(self.notes_btn)
+
+        self.work_report_btn = QPushButton("Work Report")
+        self.work_report_btn.clicked.connect(self._on_work_report)
+        self.work_report_btn.setEnabled(False)
+        action_btns.addWidget(self.work_report_btn)
 
         layout.addLayout(action_btns)
         return panel
@@ -251,10 +294,14 @@ class JobsPage(QWidget):
         self.parts_table.setRowCount(0)
         self.total_cost_label.setText("Total: $0.00")
         self.users_list.clear()
+        self.labor_summary_label.setText("No labor entries")
         for btn in (self.edit_btn, self.complete_btn, self.delete_btn,
                      self.assign_btn, self.remove_part_btn,
                      self.assign_user_btn, self.consume_btn,
-                     self.billing_btn):
+                     self.billing_btn,
+                     self.clock_in_btn, self.clock_out_btn,
+                     self.manual_entry_btn, self.view_labor_btn,
+                     self.notes_btn, self.work_report_btn):
             btn.setEnabled(False)
 
     def _on_job_selected(self, current, previous):
@@ -309,6 +356,23 @@ class JobsPage(QWidget):
         for a in assignments:
             self.users_list.addItem(f"{a.user_name} ({a.role.title()})")
 
+        # Load labor summary
+        labor = self.repo.get_labor_summary_for_job(job.id)
+        if labor["entry_count"] > 0:
+            self.labor_summary_label.setText(
+                f"{labor['entry_count']} entries — "
+                f"{labor['total_hours']:.1f}h — "
+                f"{format_currency(labor['total_cost'])}"
+            )
+        else:
+            self.labor_summary_label.setText("No labor entries")
+
+        # Check if user has active clock-in
+        has_active = False
+        if self.current_user:
+            active = self.repo.get_active_clock_in(self.current_user.id)
+            has_active = active is not None and active.job_id == job.id
+
         # Enable buttons
         is_active = job.status == "active"
         self.edit_btn.setEnabled(True)
@@ -318,7 +382,13 @@ class JobsPage(QWidget):
         self.remove_part_btn.setEnabled(is_active)
         self.assign_user_btn.setEnabled(is_active)
         self.consume_btn.setEnabled(is_active)
-        self.billing_btn.setEnabled(True)  # Always available for billing
+        self.billing_btn.setEnabled(True)
+        self.notes_btn.setEnabled(True)
+        self.work_report_btn.setEnabled(True)
+        self.clock_in_btn.setEnabled(is_active and not has_active)
+        self.clock_out_btn.setEnabled(has_active)
+        self.manual_entry_btn.setEnabled(True)
+        self.view_labor_btn.setEnabled(True)
 
     def _on_filter(self):
         self.refresh()
@@ -430,6 +500,75 @@ class JobsPage(QWidget):
             return
         from wired_part.ui.dialogs.billing_dialog import BillingDialog
         dialog = BillingDialog(
+            self.repo, self._selected_job.id, parent=self
+        )
+        dialog.exec()
+
+    def _on_clock_in(self):
+        if not self._selected_job or not self.current_user:
+            return
+        from wired_part.ui.dialogs.clock_dialog import ClockInDialog
+        dialog = ClockInDialog(
+            self.repo, self.current_user.id,
+            job_id=self._selected_job.id, parent=self
+        )
+        if dialog.exec():
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_clock_out(self):
+        if not self.current_user:
+            return
+        active = self.repo.get_active_clock_in(self.current_user.id)
+        if not active:
+            QMessageBox.information(
+                self, "Not Clocked In", "No active clock-in found."
+            )
+            return
+        from wired_part.ui.dialogs.clock_dialog import ClockOutDialog
+        dialog = ClockOutDialog(self.repo, active.id, parent=self)
+        if dialog.exec():
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_manual_entry(self):
+        if not self._selected_job:
+            return
+        user_id = self.current_user.id if self.current_user else None
+        from wired_part.ui.dialogs.labor_entry_dialog import LaborEntryDialog
+        dialog = LaborEntryDialog(
+            self.repo, user_id=user_id,
+            job_id=self._selected_job.id, parent=self
+        )
+        if dialog.exec():
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_view_labor(self):
+        if not self._selected_job:
+            return
+        from wired_part.ui.dialogs.labor_log_dialog import LaborLogDialog
+        dialog = LaborLogDialog(
+            self.repo, self._selected_job.id,
+            job_name=self._selected_job.name, parent=self
+        )
+        dialog.exec()
+        self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_notes(self):
+        if not self._selected_job:
+            return
+        user_id = self.current_user.id if self.current_user else None
+        from wired_part.ui.dialogs.notebook_dialog import NotebookDialog
+        dialog = NotebookDialog(
+            self.repo, self._selected_job.id,
+            job_name=self._selected_job.name,
+            user_id=user_id, parent=self
+        )
+        dialog.exec()
+
+    def _on_work_report(self):
+        if not self._selected_job:
+            return
+        from wired_part.ui.dialogs.work_report_dialog import WorkReportDialog
+        dialog = WorkReportDialog(
             self.repo, self._selected_job.id, parent=self
         )
         dialog.exec()
