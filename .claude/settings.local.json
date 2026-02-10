@@ -5,7 +5,10 @@
       "WebFetch(domain:fsl.software)",
       "WebFetch(domain:blog.sentry.io)",
       "WebFetch(domain:spdx.org)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)"
     ]
   }
 }
