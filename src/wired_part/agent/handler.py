@@ -37,6 +37,12 @@ class ToolHandler:
             "get_pending_orders": self._get_pending_orders,
             "get_orders_summary": self._get_orders_summary,
             "suggest_reorder": self._suggest_reorder,
+            "get_all_suppliers": self._get_all_suppliers,
+            "get_all_categories": self._get_all_categories,
+            "get_all_users": self._get_all_users,
+            "get_job_details": self._get_job_details,
+            "get_deprecated_parts": self._get_deprecated_parts,
+            "get_audit_summary": self._get_audit_summary,
         }
 
         handler = dispatch.get(tool_name)
@@ -246,7 +252,6 @@ class ToolHandler:
             "job_number": job.job_number,
             "job_name": job.name,
             "total_hours": summary.get("total_hours", 0),
-            "total_cost": format_currency(summary.get("total_cost", 0)),
             "entry_count": summary.get("entry_count", 0),
             "by_category": summary.get("by_category", []),
             "by_user": summary.get("by_user", []),
@@ -263,7 +268,6 @@ class ToolHandler:
                     "job_number": entry.job_number or "N/A",
                     "category": entry.sub_task_category,
                     "since": str(entry.start_time or ""),
-                    "rate": format_currency(entry.rate_per_hour),
                 })
         return active
 
@@ -340,3 +344,67 @@ class ToolHandler:
                 "supplier": part.supplier or "Not specified",
             })
         return suggestions
+
+    def _get_all_suppliers(self) -> list[dict]:
+        suppliers = self.repo.get_all_suppliers()
+        return [
+            {
+                "name": s.name,
+                "contact_name": s.contact_name,
+                "email": s.email,
+                "phone": s.phone,
+                "is_supply_house": bool(s.is_supply_house),
+            }
+            for s in suppliers
+        ]
+
+    def _get_all_categories(self) -> list[dict]:
+        categories = self.repo.get_all_categories()
+        return [{"id": c.id, "name": c.name} for c in categories]
+
+    def _get_all_users(self) -> list[dict]:
+        users = self.repo.get_all_users(active_only=True)
+        return [
+            {
+                "username": u.username,
+                "display_name": u.display_name,
+                "role": u.role,
+            }
+            for u in users
+        ]
+
+    def _get_job_details(self, job_number: str = "") -> dict:
+        jobs = self.repo.get_all_jobs()
+        for job in jobs:
+            if job.job_number == job_number:
+                parts = self.repo.get_job_parts(job.id)
+                return {
+                    "job_number": job.job_number,
+                    "name": job.name,
+                    "status": job.status,
+                    "customer": job.customer,
+                    "address": job.address,
+                    "priority": job.priority,
+                    "notes": job.notes,
+                    "parts_count": len(parts),
+                    "total_cost": format_currency(
+                        sum(p.quantity_used * p.unit_cost_at_use for p in parts)
+                    ),
+                }
+        return {"error": f"Job {job_number} not found"}
+
+    def _get_deprecated_parts(self) -> list[dict]:
+        parts = self.repo.get_deprecated_parts()
+        return [
+            {
+                "part_number": p.part_number,
+                "name": p.name,
+                "deprecation_status": p.deprecation_status,
+                "quantity": p.quantity,
+            }
+            for p in parts
+        ]
+
+    def _get_audit_summary(self, audit_type: str = "warehouse") -> dict:
+        summary = self.repo.get_audit_summary(audit_type)
+        return summary

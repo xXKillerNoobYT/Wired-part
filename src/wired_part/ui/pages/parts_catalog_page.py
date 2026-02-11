@@ -266,6 +266,7 @@ class CatalogSubPage(QWidget):
                 "job_qty": 0,
                 "locations": set(),
                 "is_incomplete": part.is_incomplete,
+                "deprecation_status": part.deprecation_status,
             }
             if part.quantity > 0:
                 loc = part.location or "Warehouse"
@@ -437,7 +438,7 @@ class CatalogSubPage(QWidget):
             self.refresh()
 
     def _on_delete_part(self):
-        """Delete the selected part after confirmation."""
+        """Start deprecation pipeline for the selected part."""
         part_id = self._selected_part_id()
         if part_id is None:
             return
@@ -446,27 +447,73 @@ class CatalogSubPage(QWidget):
             return
 
         display = part.display_name
+
+        # Already deprecating?
+        if part.deprecation_status:
+            if part.deprecation_status == "archived":
+                QMessageBox.information(
+                    self, "Already Archived",
+                    f"'{display}' has already been archived.",
+                )
+                return
+            # Allow cancellation
+            reply = QMessageBox.question(
+                self, "Deprecation In Progress",
+                f"'{display}' is currently being deprecated "
+                f"(status: {part.deprecation_status}).\n\n"
+                "Would you like to cancel the deprecation?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.repo.cancel_deprecation(part_id)
+                self.refresh()
+            return
+
+        # Step 1: Initial confirm
         reply = QMessageBox.question(
-            self, "Delete Part",
-            f"Delete '{display}'?\n\n"
-            "This cannot be undone. The part must not be assigned "
-            "to any jobs or trucks.",
+            self, "Deprecate Part",
+            f"Would you like to start deprecating '{display}'?\n\n"
+            "This will begin a gradual phase-out process.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        try:
-            self.repo.delete_part(part_id)
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Cannot Delete",
-                f"Could not delete part: {e}\n\n"
-                "The part may be referenced by jobs, trucks, "
-                "or purchase orders.",
-            )
+        # Step 2: Show impact
+        progress = self.repo.check_deprecation_progress(part_id)
+        impact_msg = (
+            f"Deprecation impact for '{display}':\n\n"
+            f"  Open jobs using this part: {progress['open_jobs']}\n"
+            f"  Truck inventory quantity: {progress['truck_quantity']}\n"
+            f"  Warehouse quantity: {progress['warehouse_quantity']}\n\n"
+            "This will prevent new orders for this part and "
+            "phase it out over time.\n\n"
+            "Continue?"
+        )
+        reply2 = QMessageBox.warning(
+            self, "Confirm Deprecation",
+            impact_msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply2 != QMessageBox.Yes:
+            return
+
+        self.repo.start_part_deprecation(part_id)
+        # Try to advance immediately if conditions are already met
+        new_status = self.repo.advance_deprecation(part_id)
+        QMessageBox.information(
+            self, "Deprecation Started",
+            f"'{display}' deprecation started.\n"
+            f"Current status: {new_status}\n\n"
+            "The part will be automatically phased out as:\n"
+            "1. Open jobs are completed\n"
+            "2. Truck inventory reaches zero\n"
+            "3. Warehouse stock reaches zero",
+        )
+        self.refresh()
 
     def _populate_table(self, entries: list[dict]):
         """Fill the table with filtered catalog entries."""
@@ -539,6 +586,19 @@ class CatalogSubPage(QWidget):
             # Incomplete data highlighting
             if entry.get("is_incomplete"):
                 items[0].setForeground(QColor("#f9e2af"))
+
+            # Deprecation status highlighting
+            dep_status = entry.get("deprecation_status")
+            if dep_status == "pending":
+                for item in items:
+                    item.setForeground(QColor("#fab387"))  # Orange
+            elif dep_status == "winding_down":
+                for item in items:
+                    item.setForeground(QColor("#f38ba8"))  # Red
+            elif dep_status in ("zero_stock", "archived"):
+                for item in items:
+                    item.setForeground(QColor("#6c7086"))  # Gray
+                    item.setBackground(QColor(30, 30, 30))
 
             for col, item in enumerate(items):
                 self.table.setItem(row, col, item)

@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from wired_part.config import Config
 from wired_part.database.models import LaborEntry
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import LABOR_SUBTASK_CATEGORIES
@@ -102,14 +101,6 @@ class LaborEntryDialog(QDialog):
             self.category_selector.addItem(cat)
         form.addRow("Category:", self.category_selector)
 
-        # Rate
-        self.rate_input = QDoubleSpinBox()
-        self.rate_input.setRange(0, 999.99)
-        self.rate_input.setDecimals(2)
-        self.rate_input.setPrefix("$ ")
-        self.rate_input.setValue(Config.DEFAULT_LABOR_RATE)
-        form.addRow("Hourly Rate:", self.rate_input)
-
         # Overtime
         self.overtime_check = QCheckBox("Overtime")
         form.addRow("", self.overtime_check)
@@ -171,7 +162,6 @@ class LaborEntryDialog(QDialog):
                 pass
 
         self.hours_input.setValue(entry.hours or 0)
-        self.rate_input.setValue(entry.rate_per_hour or 0)
         self.overtime_check.setChecked(bool(entry.is_overtime))
         self.description_input.setPlainText(entry.description or "")
 
@@ -213,7 +203,6 @@ class LaborEntryDialog(QDialog):
             hours=self.hours_input.value(),
             description=self.description_input.toPlainText().strip(),
             sub_task_category=self.category_selector.currentText(),
-            rate_per_hour=self.rate_input.value(),
             is_overtime=1 if self.overtime_check.isChecked() else 0,
         )
 

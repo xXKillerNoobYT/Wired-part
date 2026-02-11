@@ -74,10 +74,13 @@ class MainWindow(QMainWindow):
         from wired_part.ui.pages.parts_catalog_page import PartsCatalogPage
         from wired_part.ui.pages.trucks_inventory_page import TrucksInventoryPage
         from wired_part.ui.pages.jobs_inventory_page import JobsInventoryPage
+        from wired_part.ui.pages.truck_inventory_manager_page import TruckInventoryManagerPage
         from wired_part.ui.pages.trucks_page import TrucksPage
         from wired_part.ui.pages.jobs_page import JobsPage
         from wired_part.ui.pages.labor_page import LaborPage
+        from wired_part.ui.pages.new_orders_page import NewOrdersPage
         from wired_part.ui.pages.pending_orders_page import PendingOrdersPage
+        from wired_part.ui.pages.pending_transfers_page import PendingTransfersPage
         from wired_part.ui.pages.incoming_page import IncomingPage
         from wired_part.ui.pages.returns_page import ReturnsPage
         from wired_part.ui.pages.order_history_page import OrderHistoryPage
@@ -122,7 +125,9 @@ class MainWindow(QMainWindow):
         notif_layout.setContentsMargins(8, 4, 8, 4)
         self.notif_list = QListWidget()
         self.notif_list.setMaximumHeight(180)
+        self.notif_list.itemClicked.connect(self._on_notification_clicked)
         notif_layout.addWidget(self.notif_list)
+        self._notification_objects: list = []
         self.notif_panel.setVisible(False)
         central_layout.addWidget(self.notif_panel)
 
@@ -179,6 +184,13 @@ class MainWindow(QMainWindow):
             self.jobs_inventory_page, "Jobs Inventory"
         )
 
+        self.truck_inv_manager_page = TruckInventoryManagerPage(
+            self.repo, self.current_user,
+        )
+        self.warehouse_tabs.addTab(
+            self.truck_inv_manager_page, "Truck Stock Manager",
+        )
+
         self.warehouse_tabs.currentChanged.connect(self._on_subtab_changed)
         warehouse_layout.addWidget(self.warehouse_tabs)
         self.tabs.addTab(warehouse_container, "Warehouse & Trucks")
@@ -188,6 +200,18 @@ class MainWindow(QMainWindow):
         orders_layout = QVBoxLayout(orders_container)
         orders_layout.setContentsMargins(0, 0, 0, 0)
         self.orders_tabs = QTabWidget()
+
+        self.new_orders_page = NewOrdersPage(
+            self.repo, self.current_user,
+        )
+        self.orders_tabs.addTab(self.new_orders_page, "New Order")
+
+        self.pending_transfers_page = PendingTransfersPage(
+            self.repo, self.current_user,
+        )
+        self.orders_tabs.addTab(
+            self.pending_transfers_page, "Pending Transfers",
+        )
 
         self.pending_orders_page = PendingOrdersPage(
             self.repo, self.current_user
@@ -253,6 +277,7 @@ class MainWindow(QMainWindow):
             0: "tab_warehouse",         # Warehouse
             1: "tab_trucks_inventory",  # Trucks Inventory
             2: "tab_jobs_inventory",    # Jobs Inventory
+            3: "tab_trucks_inventory",  # Truck Stock Manager (same perm)
         }
         for idx, perm in perm_map_warehouse.items():
             if idx < self.warehouse_tabs.count():
@@ -260,10 +285,12 @@ class MainWindow(QMainWindow):
 
         # Orders & Returns sub-tabs (Tab 4)
         perm_map_orders = {
-            0: "orders_create",    # Pending Orders (create/manage)
-            1: "orders_receive",   # Incoming / Receive
-            2: "orders_return",    # Returns & Pickups
-            3: "orders_history",   # Order History
+            0: "orders_create",    # New Order
+            1: "tab_orders",       # Pending Transfers
+            2: "orders_create",    # Pending Orders (create/manage)
+            3: "orders_receive",   # Incoming / Receive
+            4: "orders_return",    # Returns & Pickups
+            5: "orders_history",   # Order History
         }
         for idx, perm in perm_map_orders.items():
             if idx < self.orders_tabs.count():
@@ -397,10 +424,10 @@ class MainWindow(QMainWindow):
     def _refresh_notifications(self):
         """Load recent notifications into the panel."""
         self.notif_list.clear()
-        notifications = self.repo.get_user_notifications(
+        self._notification_objects = self.repo.get_user_notifications(
             self.current_user.id, limit=20
         )
-        for n in notifications:
+        for n in self._notification_objects:
             prefix = ""
             if n.severity == "warning":
                 prefix = "[!] "
@@ -411,7 +438,39 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(text)
             if not n.is_read:
                 item.setBackground(Qt.GlobalColor.darkYellow)
+            item.setData(Qt.UserRole, n.id)
             self.notif_list.addItem(item)
+
+    def _on_notification_clicked(self, item):
+        """Navigate to the target tab when a notification is clicked."""
+        nid = item.data(Qt.UserRole)
+        if nid:
+            self.repo.mark_notification_read(nid)
+            self._update_status_bar()
+
+        # Find the notification object
+        notif = None
+        for n in self._notification_objects:
+            if n.id == nid:
+                notif = n
+                break
+
+        if not notif or not notif.target_tab:
+            return
+
+        # Tab navigation mapping
+        tab_map = {
+            "dashboard": 0,
+            "parts_catalog": 1,
+            "job_tracking": 2,
+            "warehouse": 3,
+            "orders": 4,
+            "agent": 5,
+            "settings": 6,
+        }
+        tab_idx = tab_map.get(notif.target_tab)
+        if tab_idx is not None:
+            self.tabs.setCurrentIndex(tab_idx)
 
     def _mark_all_read(self):
         """Mark all notifications as read."""

@@ -41,6 +41,9 @@ class Part:
     type_style: str = "[]"     # JSON array
     has_qr_tag: int = 0
     pdfs: str = "[]"           # JSON array of PDF file paths
+    # v10 deprecation fields
+    deprecation_status: Optional[str] = None  # NULL, pending, winding_down, zero_stock, archived
+    deprecation_started_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     # Joined fields (not stored directly)
@@ -193,6 +196,8 @@ class TruckInventory:
     truck_id: int = 0
     part_id: int = 0
     quantity: int = 0
+    min_quantity: int = 0
+    max_quantity: int = 0
     # Joined fields
     part_number: str = field(default="", repr=False)
     part_description: str = field(default="", repr=False)
@@ -211,6 +216,8 @@ class TruckTransfer:
     created_by: Optional[int] = None
     received_by: Optional[int] = None
     notes: str = ""
+    parts_list_id: Optional[int] = None
+    job_id: Optional[int] = None
     created_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     # Joined fields
@@ -243,6 +250,8 @@ class Notification:
     severity: str = "info"
     source: str = "system"
     is_read: int = 0
+    target_tab: str = ""
+    target_data: str = ""
     created_at: Optional[datetime] = None
 
 
@@ -280,17 +289,12 @@ class LaborEntry:
     clock_in_lon: Optional[float] = None
     clock_out_lat: Optional[float] = None
     clock_out_lon: Optional[float] = None
-    rate_per_hour: float = 0.0
     is_overtime: int = 0
     created_at: Optional[datetime] = None
     # Joined fields
     user_name: str = field(default="", repr=False)
     job_number: str = field(default="", repr=False)
     job_name: str = field(default="", repr=False)
-
-    @property
-    def total_cost(self) -> float:
-        return self.hours * self.rate_per_hour
 
     @property
     def photo_list(self) -> list[str]:
@@ -587,3 +591,49 @@ class ReturnAuthorizationItem:
     @property
     def line_total(self) -> float:
         return self.quantity * self.unit_cost
+
+
+@dataclass
+class BillingCycle:
+    id: Optional[int] = None
+    job_id: Optional[int] = None  # NULL = company default
+    cycle_type: str = "monthly"  # weekly, biweekly, monthly, quarterly
+    billing_day: int = 1  # Day of week (1=Mon) or month
+    next_billing_date: str = ""
+    created_at: Optional[datetime] = None
+    # Joined fields
+    job_number: str = field(default="", repr=False)
+    job_name: str = field(default="", repr=False)
+
+
+@dataclass
+class BillingPeriod:
+    id: Optional[int] = None
+    billing_cycle_id: int = 0
+    period_start: str = ""
+    period_end: str = ""
+    status: str = "open"  # open, closed
+    total_parts_cost: float = 0.0
+    total_hours: float = 0.0
+    created_at: Optional[datetime] = None
+    # Joined fields
+    cycle_type: str = field(default="", repr=False)
+    job_id: Optional[int] = field(default=None, repr=False)
+    job_number: str = field(default="", repr=False)
+
+
+@dataclass
+class InventoryAudit:
+    id: Optional[int] = None
+    audit_type: str = "warehouse"  # warehouse, truck, job
+    target_id: Optional[int] = None  # truck_id or job_id (NULL for warehouse)
+    part_id: int = 0
+    expected_quantity: int = 0
+    actual_quantity: int = 0
+    status: str = "confirmed"  # confirmed, discrepancy, skipped
+    audited_by: Optional[int] = None
+    audited_at: Optional[datetime] = None
+    # Joined fields
+    part_number: str = field(default="", repr=False)
+    part_name: str = field(default="", repr=False)
+    audited_by_name: str = field(default="", repr=False)

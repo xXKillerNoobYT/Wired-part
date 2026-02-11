@@ -193,12 +193,8 @@ class WorkReportDialog(QDialog):
 
                 # Summary
                 total_hours = summary.get("total_hours", 0)
-                total_cost = summary.get("total_cost", 0)
                 lines.append(
                     f"  Total Hours: {total_hours:.2f}"
-                )
-                lines.append(
-                    f"  Total Labor Cost: {format_currency(total_cost)}"
                 )
 
                 by_cat = summary.get("by_category", [])

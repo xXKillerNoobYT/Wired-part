@@ -1,6 +1,6 @@
 """Database schema definition, initialization, and migrations."""
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Each statement is a separate string to avoid executescript issues
 _SCHEMA_STATEMENTS = [
@@ -40,6 +40,8 @@ _SCHEMA_STATEMENTS = [
         type_style TEXT DEFAULT '[]',
         has_qr_tag INTEGER NOT NULL DEFAULT 0,
         pdfs TEXT DEFAULT '[]',
+        deprecation_status TEXT DEFAULT NULL,
+        deprecation_started_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
@@ -193,6 +195,8 @@ _SCHEMA_STATEMENTS = [
         truck_id INTEGER NOT NULL,
         part_id INTEGER NOT NULL,
         quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+        min_quantity INTEGER NOT NULL DEFAULT 0,
+        max_quantity INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         UNIQUE(truck_id, part_id)
@@ -210,12 +214,16 @@ _SCHEMA_STATEMENTS = [
         created_by INTEGER,
         received_by INTEGER,
         notes TEXT,
+        parts_list_id INTEGER,
+        job_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         received_at TIMESTAMP,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
-        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (parts_list_id) REFERENCES parts_lists(id) ON DELETE SET NULL,
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL
     )""",
 
     # Job assignments: many-to-many users↔jobs
@@ -240,6 +248,8 @@ _SCHEMA_STATEMENTS = [
             CHECK (severity IN ('info', 'warning', 'critical')),
         source TEXT DEFAULT 'system',
         is_read INTEGER NOT NULL DEFAULT 0,
+        target_tab TEXT DEFAULT '',
+        target_data TEXT DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
@@ -444,6 +454,72 @@ _SCHEMA_STATEMENTS = [
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT
     )""",
 
+    # Billing cycles
+    """CREATE TABLE IF NOT EXISTS billing_cycles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        cycle_type TEXT NOT NULL DEFAULT 'monthly'
+            CHECK (cycle_type IN ('weekly', 'biweekly', 'monthly', 'quarterly')),
+        billing_day INTEGER NOT NULL DEFAULT 1,
+        next_billing_date TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    )""",
+
+    # Billing periods
+    """CREATE TABLE IF NOT EXISTS billing_periods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        billing_cycle_id INTEGER NOT NULL,
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open'
+            CHECK (status IN ('open', 'closed')),
+        total_parts_cost REAL NOT NULL DEFAULT 0.0,
+        total_hours REAL NOT NULL DEFAULT 0.0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (billing_cycle_id) REFERENCES billing_cycles(id) ON DELETE CASCADE
+    )""",
+
+    # Inventory audits
+    """CREATE TABLE IF NOT EXISTS inventory_audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_type TEXT NOT NULL DEFAULT 'warehouse'
+            CHECK (audit_type IN ('warehouse', 'truck', 'job')),
+        target_id INTEGER,
+        part_id INTEGER NOT NULL,
+        expected_quantity INTEGER NOT NULL DEFAULT 0,
+        actual_quantity INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'confirmed'
+            CHECK (status IN ('confirmed', 'discrepancy', 'skipped')),
+        audited_by INTEGER,
+        audited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (audited_by) REFERENCES users(id) ON DELETE SET NULL
+    )""",
+
+    # AI order suggestions
+    """CREATE TABLE IF NOT EXISTS order_suggestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trigger_part_id INTEGER NOT NULL,
+        suggested_part_id INTEGER NOT NULL,
+        score REAL NOT NULL DEFAULT 0.0,
+        source TEXT NOT NULL DEFAULT 'co_occurrence',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (trigger_part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (suggested_part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        UNIQUE(trigger_part_id, suggested_part_id)
+    )""",
+
+    """CREATE TABLE IF NOT EXISTS order_patterns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        part_id_a INTEGER NOT NULL,
+        part_id_b INTEGER NOT NULL,
+        co_occurrence_count INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (part_id_a) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (part_id_b) REFERENCES parts(id) ON DELETE CASCADE,
+        UNIQUE(part_id_a, part_id_b)
+    )""",
+
     # Schema version tracking
     """CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER PRIMARY KEY,
@@ -466,6 +542,8 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_truck_inv_part ON truck_inventory(part_id)",
     "CREATE INDEX IF NOT EXISTS idx_transfers_truck ON truck_transfers(truck_id)",
     "CREATE INDEX IF NOT EXISTS idx_transfers_status ON truck_transfers(status)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_list ON truck_transfers(parts_list_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_job ON truck_transfers(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_assign_job ON job_assignments(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_assign_user ON job_assignments(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)",
@@ -509,6 +587,17 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_part_suppliers_part ON part_suppliers(part_id)",
     "CREATE INDEX IF NOT EXISTS idx_part_suppliers_supplier ON part_suppliers(supplier_id)",
     "CREATE INDEX IF NOT EXISTS idx_part_variants_part ON part_variants(part_id)",
+
+    # v10 indexes
+    "CREATE INDEX IF NOT EXISTS idx_parts_deprecation ON parts(deprecation_status)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_cycles_job ON billing_cycles(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_periods_cycle ON billing_periods(billing_cycle_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_periods_status ON billing_periods(status)",
+    "CREATE INDEX IF NOT EXISTS idx_audits_type ON inventory_audits(audit_type)",
+    "CREATE INDEX IF NOT EXISTS idx_audits_part ON inventory_audits(part_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audits_at ON inventory_audits(audited_at)",
+    "CREATE INDEX IF NOT EXISTS idx_suggestions_trigger ON order_suggestions(trigger_part_id)",
+    "CREATE INDEX IF NOT EXISTS idx_patterns_a ON order_patterns(part_id_a)",
 
     # ── Triggers ─────────────────────────────────────────────────
     """CREATE TRIGGER IF NOT EXISTS update_jobs_timestamp AFTER UPDATE ON jobs
@@ -611,6 +700,8 @@ _MIGRATION_V2_STATEMENTS = [
         truck_id INTEGER NOT NULL,
         part_id INTEGER NOT NULL,
         quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+        min_quantity INTEGER NOT NULL DEFAULT 0,
+        max_quantity INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         UNIQUE(truck_id, part_id)
@@ -627,12 +718,16 @@ _MIGRATION_V2_STATEMENTS = [
         created_by INTEGER,
         received_by INTEGER,
         notes TEXT,
+        parts_list_id INTEGER,
+        job_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         received_at TIMESTAMP,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
-        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (parts_list_id) REFERENCES parts_lists(id) ON DELETE SET NULL,
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL
     )""",
 
     """CREATE TABLE IF NOT EXISTS job_assignments (
@@ -655,6 +750,8 @@ _MIGRATION_V2_STATEMENTS = [
             CHECK (severity IN ('info', 'warning', 'critical')),
         source TEXT DEFAULT 'system',
         is_read INTEGER NOT NULL DEFAULT 0,
+        target_tab TEXT DEFAULT '',
+        target_data TEXT DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
@@ -683,6 +780,8 @@ _MIGRATION_V2_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_truck_inv_part ON truck_inventory(part_id)",
     "CREATE INDEX IF NOT EXISTS idx_transfers_truck ON truck_transfers(truck_id)",
     "CREATE INDEX IF NOT EXISTS idx_transfers_status ON truck_transfers(status)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_list ON truck_transfers(parts_list_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_job ON truck_transfers(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_assign_job ON job_assignments(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_assign_user ON job_assignments(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)",
@@ -1429,10 +1528,117 @@ def _migrate_v8_to_v9(conn):
     conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (9)")
 
 
+def _migrate_v9_to_v10(conn):
+    """v9 → v10: Billing cycles, zero labor rates, part deprecation."""
+    stmts = [
+        # Zero out unused rate_per_hour column (keep column for backward compat)
+        "UPDATE labor_entries SET rate_per_hour = 0",
+
+        # Parts: soft-delete deprecation columns
+        "ALTER TABLE parts ADD COLUMN deprecation_status TEXT DEFAULT NULL",
+        "ALTER TABLE parts ADD COLUMN deprecation_started_at TIMESTAMP",
+        "CREATE INDEX IF NOT EXISTS idx_parts_deprecation ON parts(deprecation_status)",
+
+        # Billing cycles table
+        """CREATE TABLE IF NOT EXISTS billing_cycles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER,
+            cycle_type TEXT NOT NULL DEFAULT 'monthly'
+                CHECK (cycle_type IN ('weekly', 'biweekly', 'monthly', 'quarterly')),
+            billing_day INTEGER NOT NULL DEFAULT 1,
+            next_billing_date TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )""",
+
+        # Billing periods table
+        """CREATE TABLE IF NOT EXISTS billing_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            billing_cycle_id INTEGER NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'closed')),
+            total_parts_cost REAL NOT NULL DEFAULT 0.0,
+            total_hours REAL NOT NULL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (billing_cycle_id) REFERENCES billing_cycles(id) ON DELETE CASCADE
+        )""",
+
+        # Indexes
+        "CREATE INDEX IF NOT EXISTS idx_billing_cycles_job ON billing_cycles(job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_billing_periods_cycle ON billing_periods(billing_cycle_id)",
+        "CREATE INDEX IF NOT EXISTS idx_billing_periods_status ON billing_periods(status)",
+
+        # Inventory audits table
+        """CREATE TABLE IF NOT EXISTS inventory_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_type TEXT NOT NULL DEFAULT 'warehouse'
+                CHECK (audit_type IN ('warehouse', 'truck', 'job')),
+            target_id INTEGER,
+            part_id INTEGER NOT NULL,
+            expected_quantity INTEGER NOT NULL DEFAULT 0,
+            actual_quantity INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'confirmed'
+                CHECK (status IN ('confirmed', 'discrepancy', 'skipped')),
+            audited_by INTEGER,
+            audited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+            FOREIGN KEY (audited_by) REFERENCES users(id) ON DELETE SET NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_audits_type ON inventory_audits(audit_type)",
+        "CREATE INDEX IF NOT EXISTS idx_audits_part ON inventory_audits(part_id)",
+        "CREATE INDEX IF NOT EXISTS idx_audits_at ON inventory_audits(audited_at)",
+
+        # Truck inventory: min/max quantities
+        "ALTER TABLE truck_inventory ADD COLUMN min_quantity INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE truck_inventory ADD COLUMN max_quantity INTEGER NOT NULL DEFAULT 0",
+
+        # Transfers: link to parts lists and jobs
+        "ALTER TABLE truck_transfers ADD COLUMN parts_list_id INTEGER",
+        "ALTER TABLE truck_transfers ADD COLUMN job_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_transfers_list ON truck_transfers(parts_list_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transfers_job ON truck_transfers(job_id)",
+
+        # AI order suggestions
+        """CREATE TABLE IF NOT EXISTS order_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_part_id INTEGER NOT NULL,
+            suggested_part_id INTEGER NOT NULL,
+            score REAL NOT NULL DEFAULT 0.0,
+            source TEXT NOT NULL DEFAULT 'co_occurrence',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trigger_part_id) REFERENCES parts(id) ON DELETE CASCADE,
+            FOREIGN KEY (suggested_part_id) REFERENCES parts(id) ON DELETE CASCADE,
+            UNIQUE(trigger_part_id, suggested_part_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS order_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            part_id_a INTEGER NOT NULL,
+            part_id_b INTEGER NOT NULL,
+            co_occurrence_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (part_id_a) REFERENCES parts(id) ON DELETE CASCADE,
+            FOREIGN KEY (part_id_b) REFERENCES parts(id) ON DELETE CASCADE,
+            UNIQUE(part_id_a, part_id_b)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_suggestions_trigger ON order_suggestions(trigger_part_id)",
+        "CREATE INDEX IF NOT EXISTS idx_patterns_a ON order_patterns(part_id_a)",
+
+        # Notifications: navigation targets
+        "ALTER TABLE notifications ADD COLUMN target_tab TEXT DEFAULT ''",
+        "ALTER TABLE notifications ADD COLUMN target_data TEXT DEFAULT ''",
+
+        # Update schema version
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (10)",
+    ]
+    for stmt in stmts:
+        conn.execute(stmt)
+
+
 def initialize_database(db_connection):
     """Create all tables, indexes, triggers, and seed data.
 
-    On a fresh database, creates the full v9 schema directly.
+    On a fresh database, creates the full v10 schema directly.
     On an existing database, applies migrations incrementally.
     """
     with db_connection.get_connection() as conn:
@@ -1471,6 +1677,8 @@ def initialize_database(db_connection):
                 _migrate_v7_to_v8(conn)
             if version < 9:
                 _migrate_v8_to_v9(conn)
+            if version < 10:
+                _migrate_v9_to_v10(conn)
 
         # Always refresh system hats to latest permissions
         _refresh_system_hat_permissions(conn)

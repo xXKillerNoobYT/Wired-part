@@ -148,6 +148,24 @@ class NotebookWidget(QWidget):
         self.notebook = self.repo.get_or_create_notebook(self.job_id)
         self._load_sections()
 
+    def switch_job(self, job_id: int):
+        """Switch to a different job's notebook.
+
+        Saves the current page, clears the UI, and reloads for the
+        new job.
+        """
+        self._save_current_page()
+        self.job_id = job_id
+        self._current_section_id = None
+        self._current_page_id = None
+        self.pages_list.clear()
+        self.page_title_input.clear()
+        self.page_title_input.setEnabled(False)
+        self.editor.set_content("")
+        self.editor.set_read_only(True)
+        self.status_label.setText("Loading notebook...")
+        self._load_notebook()
+
     def _is_locked_section(self, name: str) -> bool:
         """Check if a section name is a locked (protected) section."""
         return name in LOCKED_NOTEBOOK_SECTIONS

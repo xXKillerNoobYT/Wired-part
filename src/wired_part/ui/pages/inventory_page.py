@@ -78,6 +78,11 @@ class InventoryPage(QWidget):
         self.delete_btn.setEnabled(False)
         toolbar.addWidget(self.delete_btn)
 
+        self.audit_btn = QPushButton("Fast Audit")
+        self.audit_btn.setToolTip("Quick card-swipe inventory audit")
+        self.audit_btn.clicked.connect(self._on_audit)
+        toolbar.addWidget(self.audit_btn)
+
         layout.addLayout(toolbar)
 
         # ── Parts Table ─────────────────────────────────────────
@@ -210,6 +215,12 @@ class InventoryPage(QWidget):
         dialog = PartDialog(self.repo, part=part, parent=self)
         if dialog.exec():
             self.refresh()
+
+    def _on_audit(self):
+        from wired_part.ui.dialogs.audit_dialog import AuditDialog
+        dialog = AuditDialog(self.repo, "warehouse", parent=self)
+        dialog.exec()
+        self.refresh()
 
     def _on_delete(self):
         part = self._selected_part()

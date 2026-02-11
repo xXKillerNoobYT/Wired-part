@@ -3,6 +3,7 @@
 import json
 from typing import Callable
 
+import httpx
 from openai import OpenAI
 
 from wired_part.agent.prompts import SYSTEM_PROMPT
@@ -17,7 +18,11 @@ class LMStudioClient:
         self.client = OpenAI(
             base_url=Config.LM_STUDIO_BASE_URL,
             api_key=Config.LM_STUDIO_API_KEY,
-            timeout=Config.LM_STUDIO_TIMEOUT,
+            timeout=httpx.Timeout(
+                total=300.0,
+                connect=10.0,
+                read=float(Config.LM_STUDIO_TIMEOUT),
+            ),
         )
         self.tool_executor = tool_executor
         self.messages: list[dict] = [

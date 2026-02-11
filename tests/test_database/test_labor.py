@@ -42,7 +42,6 @@ class TestLaborEntryCRUD:
             hours=2.0,
             description="Rough-in wiring",
             sub_task_category="Rough-in",
-            rate_per_hour=45.0,
         )
         eid = repo.create_labor_entry(entry)
         assert eid > 0
@@ -56,7 +55,6 @@ class TestLaborEntryCRUD:
             hours=3.5,
             description="Testing circuits",
             sub_task_category="Testing",
-            rate_per_hour=50.0,
         )
         eid = repo.create_labor_entry(entry)
         fetched = repo.get_labor_entry_by_id(eid)
@@ -64,7 +62,6 @@ class TestLaborEntryCRUD:
         assert fetched.user_name == "Laborer One"
         assert fetched.job_number == "JOB-LABOR-001"
         assert fetched.sub_task_category == "Testing"
-        assert fetched.rate_per_hour == 50.0
 
     def test_update_labor_entry(self, repo, labor_data):
         eid = repo.create_labor_entry(LaborEntry(
@@ -123,7 +120,6 @@ class TestClockInOut:
             user_id=labor_data["user_id"],
             job_id=labor_data["job_id"],
             category="Rough-in",
-            rate=45.0,
         )
         assert eid > 0
         entry = repo.get_labor_entry_by_id(eid)
@@ -145,7 +141,6 @@ class TestClockInOut:
         eid = repo.clock_in(
             user_id=labor_data["user_id"],
             job_id=labor_data["job_id"],
-            rate=50.0,
         )
         result = repo.clock_out(
             eid, description="Completed wiring"
@@ -189,20 +184,19 @@ class TestLaborSummary:
             user_id=labor_data["user_id"],
             job_id=labor_data["job_id"],
             start_time=datetime.now().isoformat(),
-            hours=4.0, rate_per_hour=50.0,
+            hours=4.0,
             sub_task_category="Rough-in",
         ))
         repo.create_labor_entry(LaborEntry(
             user_id=labor_data["user_id"],
             job_id=labor_data["job_id"],
             start_time=datetime.now().isoformat(),
-            hours=2.0, rate_per_hour=50.0,
+            hours=2.0,
             sub_task_category="Testing",
         ))
 
         summary = repo.get_labor_summary_for_job(labor_data["job_id"])
         assert summary["total_hours"] == 6.0
-        assert summary["total_cost"] == 300.0
         assert summary["entry_count"] == 2
         assert len(summary["by_category"]) == 2
         assert len(summary["by_user"]) == 1

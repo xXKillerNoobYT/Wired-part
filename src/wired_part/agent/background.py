@@ -29,11 +29,16 @@ class AgentWorker(QThread):
 
     def run(self):
         try:
+            import httpx
             from openai import OpenAI
             client = OpenAI(
                 base_url=Config.LM_STUDIO_BASE_URL,
                 api_key=Config.LM_STUDIO_API_KEY,
-                timeout=Config.LM_STUDIO_TIMEOUT,
+                timeout=httpx.Timeout(
+                    total=300.0,
+                    connect=10.0,
+                    read=float(Config.LM_STUDIO_TIMEOUT),
+                ),
             )
 
             from wired_part.agent.tools import AGENT_TOOLS
@@ -43,8 +48,8 @@ class AgentWorker(QThread):
                 {"role": "user", "content": self.task_prompt},
             ]
 
-            # Agentic loop — up to 5 rounds of tool calls
-            for _ in range(5):
+            # Agentic loop — up to 10 rounds of tool calls
+            for _ in range(10):
                 response = client.chat.completions.create(
                     model=Config.LM_STUDIO_MODEL,
                     messages=messages,

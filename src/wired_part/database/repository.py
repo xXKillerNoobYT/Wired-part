@@ -780,6 +780,54 @@ class Repository:
         """, (truck_id, part_id))
         return rows[0]["quantity"] if rows else 0
 
+    def add_to_truck_inventory(
+        self, truck_id: int, part_id: int, quantity: int,
+    ):
+        """Directly add/upsert quantity into truck on-hand inventory."""
+        self.db.execute("""
+            INSERT INTO truck_inventory (truck_id, part_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(truck_id, part_id) DO UPDATE SET
+                quantity = quantity + excluded.quantity
+        """, (truck_id, part_id, quantity))
+
+    def set_truck_inventory_levels(
+        self, truck_id: int, part_id: int,
+        min_quantity: int = 0, max_quantity: int = 0,
+    ):
+        """Set min/max stock levels for a part on a truck."""
+        self.db.execute("""
+            UPDATE truck_inventory
+            SET min_quantity = ?, max_quantity = ?
+            WHERE truck_id = ? AND part_id = ?
+        """, (min_quantity, max_quantity, truck_id, part_id))
+
+    def set_truck_inventory_quantity(
+        self, truck_id: int, part_id: int, quantity: int,
+    ):
+        """Directly set current quantity (does NOT affect warehouse)."""
+        self.db.execute("""
+            INSERT INTO truck_inventory (truck_id, part_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(truck_id, part_id) DO UPDATE SET
+                quantity = excluded.quantity
+        """, (truck_id, part_id, quantity))
+
+    def get_truck_inventory_with_levels(
+        self, truck_id: int,
+    ) -> list[TruckInventory]:
+        """Get truck inventory including min/max levels (all items, even 0)."""
+        rows = self.db.execute("""
+            SELECT ti.*, p.part_number, p.description AS part_description,
+                   p.unit_cost, t.truck_number
+            FROM truck_inventory ti
+            JOIN parts p ON ti.part_id = p.id
+            JOIN trucks t ON ti.truck_id = t.id
+            WHERE ti.truck_id = ?
+            ORDER BY p.part_number
+        """, (truck_id,))
+        return [TruckInventory(**dict(r)) for r in rows]
+
     # ── Truck Transfers ─────────────────────────────────────────
 
     def create_transfer(self, transfer: TruckTransfer) -> int:
@@ -963,6 +1011,25 @@ class Repository:
             WHERE tt.status = 'pending'
             ORDER BY tt.created_at DESC
         """)
+        return [TruckTransfer(**dict(r)) for r in rows]
+
+    def get_recent_returns(self, limit: int = 50) -> list[TruckTransfer]:
+        """Get recently completed return transfers."""
+        rows = self.db.execute("""
+            SELECT tt.*,
+                   p.part_number, p.description AS part_description,
+                   t.truck_number,
+                   COALESCE(uc.display_name, '') AS created_by_name,
+                   COALESCE(ur.display_name, '') AS received_by_name
+            FROM truck_transfers tt
+            JOIN parts p ON tt.part_id = p.id
+            JOIN trucks t ON tt.truck_id = t.id
+            LEFT JOIN users uc ON tt.created_by = uc.id
+            LEFT JOIN users ur ON tt.received_by = ur.id
+            WHERE tt.direction = 'return'
+            ORDER BY tt.created_at DESC
+            LIMIT ?
+        """, (limit,))
         return [TruckTransfer(**dict(r)) for r in rows]
 
     # ── Part Consumption (Truck -> Job) ─────────────────────────
@@ -1248,6 +1315,242 @@ class Repository:
                 "DELETE FROM suppliers WHERE id = ?", (supplier_id,)
             )
 
+    # ── Inventory Audits ────────────────────────────────────────
+
+    def get_audit_items(
+        self, audit_type: str, target_id: int = None,
+        limit: int = 10
+    ) -> list[dict]:
+        """Get items to audit, sorted by oldest audit.
+
+        audit_type: 'warehouse', 'truck', or 'job'
+        target_id: truck_id or job_id (None for warehouse)
+        limit: number of items (10, 25, or 0 for all)
+        """
+        if audit_type == "warehouse":
+            query = """
+                SELECT p.id AS part_id, p.part_number, p.name,
+                       p.quantity AS expected_quantity,
+                       p.image_path, p.location,
+                       MAX(ia.audited_at) AS last_audited
+                FROM parts p
+                LEFT JOIN inventory_audits ia
+                    ON ia.part_id = p.id
+                    AND ia.audit_type = 'warehouse'
+                WHERE p.quantity > 0
+                GROUP BY p.id
+                ORDER BY last_audited ASC NULLS FIRST
+            """
+            params: tuple = ()
+        elif audit_type == "truck":
+            query = """
+                SELECT ti.part_id, p.part_number, p.name,
+                       ti.quantity AS expected_quantity,
+                       p.image_path, p.location,
+                       MAX(ia.audited_at) AS last_audited
+                FROM truck_inventory ti
+                JOIN parts p ON ti.part_id = p.id
+                LEFT JOIN inventory_audits ia
+                    ON ia.part_id = ti.part_id
+                    AND ia.audit_type = 'truck'
+                    AND ia.target_id = ?
+                WHERE ti.truck_id = ? AND ti.quantity > 0
+                GROUP BY ti.part_id
+                ORDER BY last_audited ASC NULLS FIRST
+            """
+            params = (target_id, target_id)
+        else:  # job
+            query = """
+                SELECT jp.part_id, p.part_number, p.name,
+                       jp.quantity_used AS expected_quantity,
+                       p.image_path, p.location,
+                       MAX(ia.audited_at) AS last_audited
+                FROM job_parts jp
+                JOIN parts p ON jp.part_id = p.id
+                LEFT JOIN inventory_audits ia
+                    ON ia.part_id = jp.part_id
+                    AND ia.audit_type = 'job'
+                    AND ia.target_id = ?
+                WHERE jp.job_id = ?
+                GROUP BY jp.part_id
+                ORDER BY last_audited ASC NULLS FIRST
+            """
+            params = (target_id, target_id)
+
+        if limit > 0:
+            query += f" LIMIT {limit}"
+
+        rows = self.db.execute(query, params)
+        return [dict(r) for r in rows]
+
+    def record_audit_result(
+        self, audit_type: str, target_id: int,
+        part_id: int, expected_quantity: int,
+        actual_quantity: int, status: str,
+        audited_by: int = None
+    ) -> int:
+        """Record a single audit result."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO inventory_audits
+                    (audit_type, target_id, part_id,
+                     expected_quantity, actual_quantity,
+                     status, audited_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                audit_type, target_id, part_id,
+                expected_quantity, actual_quantity,
+                status, audited_by,
+            ))
+            return cursor.lastrowid
+
+    def get_audit_summary(
+        self, audit_type: str, target_id: int = None
+    ) -> dict:
+        """Get audit summary: last audit date, discrepancy count."""
+        if target_id:
+            rows = self.db.execute("""
+                SELECT MAX(audited_at) AS last_audit,
+                       COUNT(CASE WHEN status = 'discrepancy' THEN 1 END)
+                           AS discrepancy_count,
+                       COUNT(CASE WHEN status = 'confirmed' THEN 1 END)
+                           AS confirmed_count,
+                       COUNT(CASE WHEN status = 'skipped' THEN 1 END)
+                           AS skipped_count,
+                       COUNT(*) AS total_count
+                FROM inventory_audits
+                WHERE audit_type = ? AND target_id = ?
+            """, (audit_type, target_id))
+        else:
+            rows = self.db.execute("""
+                SELECT MAX(audited_at) AS last_audit,
+                       COUNT(CASE WHEN status = 'discrepancy' THEN 1 END)
+                           AS discrepancy_count,
+                       COUNT(CASE WHEN status = 'confirmed' THEN 1 END)
+                           AS confirmed_count,
+                       COUNT(CASE WHEN status = 'skipped' THEN 1 END)
+                           AS skipped_count,
+                       COUNT(*) AS total_count
+                FROM inventory_audits
+                WHERE audit_type = ?
+            """, (audit_type,))
+
+        if rows:
+            return dict(rows[0])
+        return {
+            "last_audit": None,
+            "discrepancy_count": 0,
+            "confirmed_count": 0,
+            "skipped_count": 0,
+            "total_count": 0,
+        }
+
+    # ── Part Deprecation ────────────────────────────────────────
+
+    def start_part_deprecation(self, part_id: int):
+        """Begin the deprecation pipeline for a part."""
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE parts
+                SET deprecation_status = 'pending',
+                    deprecation_started_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND deprecation_status IS NULL
+            """, (part_id,))
+
+    def check_deprecation_progress(self, part_id: int) -> dict:
+        """Check the current state of a part's deprecation."""
+        # Count open jobs that use this part
+        open_jobs = self.db.execute("""
+            SELECT COUNT(DISTINCT jp.job_id) AS cnt
+            FROM job_parts jp
+            JOIN jobs j ON jp.job_id = j.id
+            WHERE jp.part_id = ? AND j.status IN ('active', 'on_hold')
+        """, (part_id,))
+        open_job_count = open_jobs[0]["cnt"] if open_jobs else 0
+
+        # Count truck inventory
+        truck_rows = self.db.execute("""
+            SELECT COALESCE(SUM(quantity), 0) AS qty
+            FROM truck_inventory
+            WHERE part_id = ?
+        """, (part_id,))
+        truck_qty = truck_rows[0]["qty"] if truck_rows else 0
+
+        # Warehouse qty
+        part = self.get_part_by_id(part_id)
+        warehouse_qty = part.quantity if part else 0
+
+        return {
+            "open_jobs": open_job_count,
+            "truck_quantity": truck_qty,
+            "warehouse_quantity": warehouse_qty,
+            "deprecation_status": part.deprecation_status if part else None,
+        }
+
+    def advance_deprecation(self, part_id: int) -> str:
+        """Try to advance a part's deprecation to the next stage.
+
+        Returns the new status or the current one if conditions aren't met.
+
+        Pipeline:
+          pending → winding_down (all open jobs closed or part removed)
+          winding_down → zero_stock (truck qty = 0)
+          zero_stock → archived (warehouse qty = 0)
+        """
+        progress = self.check_deprecation_progress(part_id)
+        current = progress["deprecation_status"]
+
+        if current == "pending":
+            if progress["open_jobs"] == 0:
+                with self.db.get_connection() as conn:
+                    conn.execute(
+                        "UPDATE parts SET deprecation_status = 'winding_down' "
+                        "WHERE id = ?", (part_id,)
+                    )
+                return "winding_down"
+
+        elif current == "winding_down":
+            if progress["truck_quantity"] == 0:
+                with self.db.get_connection() as conn:
+                    conn.execute(
+                        "UPDATE parts SET deprecation_status = 'zero_stock' "
+                        "WHERE id = ?", (part_id,)
+                    )
+                return "zero_stock"
+
+        elif current == "zero_stock":
+            if progress["warehouse_quantity"] == 0:
+                with self.db.get_connection() as conn:
+                    conn.execute(
+                        "UPDATE parts SET deprecation_status = 'archived' "
+                        "WHERE id = ?", (part_id,)
+                    )
+                return "archived"
+
+        return current or ""
+
+    def cancel_deprecation(self, part_id: int):
+        """Cancel an in-progress deprecation."""
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE parts
+                SET deprecation_status = NULL,
+                    deprecation_started_at = NULL
+                WHERE id = ? AND deprecation_status != 'archived'
+            """, (part_id,))
+
+    def get_deprecated_parts(self) -> list[Part]:
+        """Get all parts with an active deprecation status."""
+        rows = self.db.execute(
+            self._PARTS_SELECT
+            + " WHERE p.deprecation_status IS NOT NULL "
+            "ORDER BY p.deprecation_started_at"
+        )
+        return [Part(**{
+            k: r[k] for k in r.keys()
+            if k in Part.__dataclass_fields__
+        }) for r in rows]
+
     # ── Parts Lists ──────────────────────────────────────────────
 
     def create_parts_list(self, parts_list: PartsList) -> int:
@@ -1456,6 +1759,132 @@ class Repository:
             "consumption_count": len(rows),
         }
 
+    # ── Billing Cycles & Periods ────────────────────────────────
+
+    def get_or_create_billing_cycle(
+        self, job_id: int = None, cycle_type: str = "monthly",
+        billing_day: int = 1
+    ) -> "BillingCycle":
+        """Get existing billing cycle for a job, or create one."""
+        from wired_part.database.models import BillingCycle
+        if job_id:
+            rows = self.db.execute(
+                "SELECT * FROM billing_cycles WHERE job_id = ?",
+                (job_id,),
+            )
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM billing_cycles WHERE job_id IS NULL",
+            )
+        if rows:
+            return BillingCycle(**{
+                k: rows[0][k] for k in rows[0].keys()
+                if k in BillingCycle.__dataclass_fields__
+            })
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO billing_cycles (job_id, cycle_type, billing_day)
+                VALUES (?, ?, ?)
+            """, (job_id, cycle_type, billing_day))
+            return BillingCycle(
+                id=cursor.lastrowid, job_id=job_id,
+                cycle_type=cycle_type, billing_day=billing_day,
+            )
+
+    def get_billing_cycles(self) -> list:
+        """Get all billing cycles with optional job info."""
+        from wired_part.database.models import BillingCycle
+        rows = self.db.execute("""
+            SELECT bc.*,
+                   COALESCE(j.job_number, '') AS job_number,
+                   COALESCE(j.name, '') AS job_name
+            FROM billing_cycles bc
+            LEFT JOIN jobs j ON bc.job_id = j.id
+            ORDER BY bc.created_at DESC
+        """)
+        return [BillingCycle(**{
+            k: r[k] for k in r.keys()
+            if k in BillingCycle.__dataclass_fields__
+        }) for r in rows]
+
+    def create_billing_period(
+        self, cycle_id: int, period_start: str, period_end: str
+    ) -> int:
+        """Create a new billing period for a cycle."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO billing_periods
+                    (billing_cycle_id, period_start, period_end)
+                VALUES (?, ?, ?)
+            """, (cycle_id, period_start, period_end))
+            return cursor.lastrowid
+
+    def get_billing_periods(self, cycle_id: int) -> list:
+        """Get all billing periods for a cycle."""
+        from wired_part.database.models import BillingPeriod
+        rows = self.db.execute("""
+            SELECT bp.*,
+                   bc.cycle_type,
+                   bc.job_id,
+                   COALESCE(j.job_number, '') AS job_number
+            FROM billing_periods bp
+            JOIN billing_cycles bc ON bp.billing_cycle_id = bc.id
+            LEFT JOIN jobs j ON bc.job_id = j.id
+            WHERE bp.billing_cycle_id = ?
+            ORDER BY bp.period_start DESC
+        """, (cycle_id,))
+        return [BillingPeriod(**{
+            k: r[k] for k in r.keys()
+            if k in BillingPeriod.__dataclass_fields__
+        }) for r in rows]
+
+    def close_billing_period(self, period_id: int):
+        """Close a billing period, calculating totals."""
+        from wired_part.database.models import BillingPeriod
+        rows = self.db.execute(
+            "SELECT bp.*, bc.job_id, bc.cycle_type, "
+            "COALESCE(j.job_number, '') AS job_number "
+            "FROM billing_periods bp "
+            "JOIN billing_cycles bc ON bp.billing_cycle_id = bc.id "
+            "LEFT JOIN jobs j ON bc.job_id = j.id "
+            "WHERE bp.id = ?", (period_id,)
+        )
+        if not rows:
+            raise ValueError(f"Billing period {period_id} not found")
+        period = BillingPeriod(**{
+            k: rows[0][k] for k in rows[0].keys()
+            if k in BillingPeriod.__dataclass_fields__
+        })
+
+        # Calculate total parts cost for period
+        job_id = rows[0]["job_id"]
+        if job_id:
+            billing = self.get_billing_data(
+                job_id, period.period_start, period.period_end
+            )
+            total_parts = billing.get("subtotal", 0.0)
+
+            labor_summary = self.get_labor_summary_for_job(job_id)
+            total_hours = labor_summary.get("total_hours", 0.0)
+        else:
+            total_parts = 0.0
+            total_hours = 0.0
+
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE billing_periods
+                SET status = 'closed',
+                    total_parts_cost = ?,
+                    total_hours = ?
+                WHERE id = ?
+            """, (total_parts, total_hours, period_id))
+
+    def get_billing_data_for_period(
+        self, job_id: int, period_start: str, period_end: str
+    ) -> dict:
+        """Get billing data filtered by a specific period."""
+        return self.get_billing_data(job_id, period_start, period_end)
+
     # ── Labor Entries ─────────────────────────────────────────────
 
     def create_labor_entry(self, entry: LaborEntry) -> int:
@@ -1465,15 +1894,15 @@ class Repository:
                     (user_id, job_id, start_time, end_time, hours,
                      description, sub_task_category, photos,
                      clock_in_lat, clock_in_lon, clock_out_lat, clock_out_lon,
-                     rate_per_hour, is_overtime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_overtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.user_id, entry.job_id, entry.start_time,
                 entry.end_time, entry.hours, entry.description,
                 entry.sub_task_category, entry.photos,
                 entry.clock_in_lat, entry.clock_in_lon,
                 entry.clock_out_lat, entry.clock_out_lon,
-                entry.rate_per_hour, entry.is_overtime,
+                entry.is_overtime,
             ))
             return cursor.lastrowid
 
@@ -1485,7 +1914,7 @@ class Repository:
                     hours = ?, description = ?, sub_task_category = ?,
                     photos = ?, clock_in_lat = ?, clock_in_lon = ?,
                     clock_out_lat = ?, clock_out_lon = ?,
-                    rate_per_hour = ?, is_overtime = ?
+                    is_overtime = ?
                 WHERE id = ?
             """, (
                 entry.user_id, entry.job_id, entry.start_time,
@@ -1493,7 +1922,7 @@ class Repository:
                 entry.sub_task_category, entry.photos,
                 entry.clock_in_lat, entry.clock_in_lon,
                 entry.clock_out_lat, entry.clock_out_lon,
-                entry.rate_per_hour, entry.is_overtime, entry.id,
+                entry.is_overtime, entry.id,
             ))
 
     def delete_labor_entry(self, entry_id: int):
@@ -1512,7 +1941,7 @@ class Repository:
             JOIN jobs j ON le.job_id = j.id
             WHERE le.id = ?
         """, (entry_id,))
-        return LaborEntry(**dict(rows[0])) if rows else None
+        return LaborEntry(**{k: rows[0][k] for k in rows[0].keys() if k in LaborEntry.__dataclass_fields__}) if rows else None
 
     def get_labor_entries_for_job(
         self, job_id: int,
@@ -1537,7 +1966,7 @@ class Repository:
             WHERE {where}
             ORDER BY le.start_time DESC
         """, tuple(params))
-        return [LaborEntry(**dict(r)) for r in rows]
+        return [LaborEntry(**{k: r[k] for k in r.keys() if k in LaborEntry.__dataclass_fields__}) for r in rows]
 
     def get_labor_entries_for_user(
         self, user_id: int,
@@ -1562,7 +1991,7 @@ class Repository:
             WHERE {where}
             ORDER BY le.start_time DESC
         """, tuple(params))
-        return [LaborEntry(**dict(r)) for r in rows]
+        return [LaborEntry(**{k: r[k] for k in r.keys() if k in LaborEntry.__dataclass_fields__}) for r in rows]
 
     def get_active_clock_in(self, user_id: int) -> Optional[LaborEntry]:
         """Get the active (un-clocked-out) labor entry for a user."""
@@ -1576,12 +2005,11 @@ class Repository:
             WHERE le.user_id = ? AND le.end_time IS NULL
             ORDER BY le.start_time DESC LIMIT 1
         """, (user_id,))
-        return LaborEntry(**dict(rows[0])) if rows else None
+        return LaborEntry(**{k: rows[0][k] for k in rows[0].keys() if k in LaborEntry.__dataclass_fields__}) if rows else None
 
     def clock_in(self, user_id: int, job_id: int,
                  category: str = "General",
                  lat: float = None, lon: float = None,
-                 rate: float = 0.0,
                  photos: str = None) -> int:
         """Start a clock-in entry for a user on a job."""
         from datetime import datetime
@@ -1599,7 +2027,6 @@ class Repository:
             sub_task_category=category,
             clock_in_lat=lat,
             clock_in_lon=lon,
-            rate_per_hour=rate,
             photos=photos or "[]",
         )
         entry_id = self.create_labor_entry(entry)
@@ -1665,16 +2092,15 @@ class Repository:
         return refreshed
 
     def get_labor_summary_for_job(self, job_id: int) -> dict:
-        """Get labor summary: total hours, cost, breakdown by category/user."""
+        """Get labor summary: total hours, breakdown by category/user."""
         rows = self.db.execute("""
             SELECT
                 COALESCE(SUM(hours), 0) AS total_hours,
-                COALESCE(SUM(hours * rate_per_hour), 0) AS total_cost,
                 COUNT(*) AS entry_count
             FROM labor_entries WHERE job_id = ?
         """, (job_id,))
         summary = dict(rows[0]) if rows else {
-            "total_hours": 0, "total_cost": 0, "entry_count": 0
+            "total_hours": 0, "entry_count": 0
         }
 
         # By category
@@ -3095,3 +3521,78 @@ class Repository:
                     all_shortfalls[key] = dict(sf)
 
         return list(all_shortfalls.values())
+
+    # ── Order Suggestions ──────────────────────────────────────
+
+    def get_suggestions_for_part(self, part_id: int, limit: int = 5
+                                 ) -> list[dict]:
+        """Get AI-suggested parts to order alongside the given part."""
+        rows = self.db.execute("""
+            SELECT os.suggested_part_id, os.score, os.source,
+                   p.part_number, p.name, p.description,
+                   p.quantity, p.unit_cost
+            FROM order_suggestions os
+            JOIN parts p ON os.suggested_part_id = p.id
+            WHERE os.trigger_part_id = ?
+            ORDER BY os.score DESC
+            LIMIT ?
+        """, (part_id, limit))
+        return [dict(r) for r in rows]
+
+    def update_co_occurrence(self, part_a: int, part_b: int):
+        """Increment co-occurrence count between two parts."""
+        # Ensure consistent ordering (smaller ID first)
+        a, b = min(part_a, part_b), max(part_a, part_b)
+        self.db.execute("""
+            INSERT INTO order_patterns (part_id_a, part_id_b, co_occurrence_count)
+            VALUES (?, ?, 1)
+            ON CONFLICT(part_id_a, part_id_b) DO UPDATE SET
+                co_occurrence_count = co_occurrence_count + 1
+        """, (a, b))
+
+    def rebuild_order_patterns(self):
+        """Rebuild co-occurrence matrix from closed POs (full history)."""
+        with self.db.get_connection() as conn:
+            # Clear existing patterns
+            conn.execute("DELETE FROM order_patterns")
+            conn.execute("DELETE FROM order_suggestions")
+
+            # Find all part pairs that appeared on the same PO
+            rows = conn.execute("""
+                SELECT poi1.part_id AS part_a,
+                       poi2.part_id AS part_b,
+                       COUNT(*) AS cnt
+                FROM po_items poi1
+                JOIN po_items poi2
+                    ON poi1.po_id = poi2.po_id
+                    AND poi1.part_id < poi2.part_id
+                JOIN purchase_orders po ON poi1.po_id = po.id
+                WHERE po.status IN ('received', 'closed')
+                GROUP BY poi1.part_id, poi2.part_id
+                HAVING cnt >= 2
+            """).fetchall()
+
+            for row in rows:
+                conn.execute("""
+                    INSERT INTO order_patterns
+                        (part_id_a, part_id_b, co_occurrence_count)
+                    VALUES (?, ?, ?)
+                """, (row["part_a"], row["part_b"], row["cnt"]))
+
+            # Build suggestions from patterns
+            conn.execute("""
+                INSERT OR REPLACE INTO order_suggestions
+                    (trigger_part_id, suggested_part_id, score, source)
+                SELECT part_id_a, part_id_b,
+                       CAST(co_occurrence_count AS REAL), 'co_occurrence'
+                FROM order_patterns
+                WHERE co_occurrence_count >= 2
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO order_suggestions
+                    (trigger_part_id, suggested_part_id, score, source)
+                SELECT part_id_b, part_id_a,
+                       CAST(co_occurrence_count AS REAL), 'co_occurrence'
+                FROM order_patterns
+                WHERE co_occurrence_count >= 2
+            """)

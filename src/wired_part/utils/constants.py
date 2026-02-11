@@ -1,7 +1,7 @@
 """Application-wide constants."""
 
 APP_NAME = "Wired-Part"
-APP_VERSION = "9.0.0"
+APP_VERSION = "10.0.0"
 APP_ORGANIZATION = "WeirdToo LLC"
 
 # Job statuses

@@ -786,6 +786,7 @@ class SettingsPage(QWidget):
     def _populate_model_combo(self, model_names: list):
         """Fill the model combo box, preserving the current selection."""
         current = self.llm_model_combo.currentText()
+        self.llm_model_combo.blockSignals(True)
         self.llm_model_combo.clear()
         for name in model_names:
             self.llm_model_combo.addItem(name)
@@ -793,8 +794,13 @@ class SettingsPage(QWidget):
         idx = self.llm_model_combo.findText(current)
         if idx >= 0:
             self.llm_model_combo.setCurrentIndex(idx)
+        elif current:
+            # Re-add the user's saved/custom model so it isn't lost
+            self.llm_model_combo.insertItem(0, current)
+            self.llm_model_combo.setCurrentIndex(0)
         elif len(model_names) == 1:
             self.llm_model_combo.setCurrentIndex(0)
+        self.llm_model_combo.blockSignals(False)
 
     def _reset_llm_defaults(self):
         self.llm_url_input.setText("http://localhost:1234/v1")
@@ -903,17 +909,6 @@ class SettingsPage(QWidget):
         settings_group = QGroupBox("Labor Tracking Settings")
         form = QFormLayout()
 
-        self.labor_rate_spin = QDoubleSpinBox()
-        self.labor_rate_spin.setRange(0.0, 999.99)
-        self.labor_rate_spin.setDecimals(2)
-        self.labor_rate_spin.setValue(Config.DEFAULT_LABOR_RATE)
-        self.labor_rate_spin.setPrefix("$ ")
-        self.labor_rate_spin.setSuffix(" / hr")
-        self.labor_rate_spin.setToolTip(
-            "Default hourly rate pre-filled when clocking in"
-        )
-        form.addRow("Default Labor Rate:", self.labor_rate_spin)
-
         self.geofence_spin = QDoubleSpinBox()
         self.geofence_spin.setRange(0.01, 50.0)
         self.geofence_spin.setDecimals(2)
@@ -968,8 +963,6 @@ class SettingsPage(QWidget):
         desc_layout = QVBoxLayout()
         desc_layout.addWidget(QLabel(
             "Configure defaults for the labor tracking system.\n\n"
-            "Default Labor Rate: Pre-filled rate when clocking in. "
-            "Can be overridden per entry.\n\n"
             "Geofence Radius: When GPS coordinates are provided during "
             "clock-in/out, the system checks if the worker is within "
             "this radius of the job site. A warning is shown if outside "
@@ -981,6 +974,41 @@ class SettingsPage(QWidget):
         ))
         desc_group.setLayout(desc_layout)
         layout.addWidget(desc_group)
+
+        # ── Billing Settings ─────────────────────────────────
+        billing_group = QGroupBox("Default Billing Cycle")
+        billing_form = QFormLayout()
+
+        self.billing_cycle_combo = QComboBox()
+        self.billing_cycle_combo.addItem("Weekly", "weekly")
+        self.billing_cycle_combo.addItem("Biweekly", "biweekly")
+        self.billing_cycle_combo.addItem("Monthly", "monthly")
+        self.billing_cycle_combo.addItem("Quarterly", "quarterly")
+        idx = self.billing_cycle_combo.findData(Config.DEFAULT_BILLING_CYCLE)
+        if idx >= 0:
+            self.billing_cycle_combo.setCurrentIndex(idx)
+        billing_form.addRow("Cycle Type:", self.billing_cycle_combo)
+
+        self.billing_day_spin = QSpinBox()
+        self.billing_day_spin.setRange(1, 31)
+        self.billing_day_spin.setValue(Config.DEFAULT_BILLING_DAY)
+        self.billing_day_spin.setToolTip(
+            "Day of month for monthly/quarterly, or day of week "
+            "(1=Mon) for weekly/biweekly"
+        )
+        billing_form.addRow("Billing Day:", self.billing_day_spin)
+
+        billing_group.setLayout(billing_form)
+        layout.addWidget(billing_group)
+
+        billing_save_btn = QPushButton("Save Billing Settings")
+        billing_save_btn.setMinimumHeight(34)
+        billing_save_btn.clicked.connect(self._save_billing_config)
+        layout.addWidget(billing_save_btn)
+
+        self.billing_status = QLabel("")
+        self.billing_status.setWordWrap(True)
+        layout.addWidget(self.billing_status)
 
         layout.addStretch()
 
@@ -996,7 +1024,6 @@ class SettingsPage(QWidget):
     def _save_labor_config(self):
         from wired_part.config import Config
 
-        rate = self.labor_rate_spin.value()
         radius = self.geofence_spin.value()
         photos_dir = self.photos_dir_input.text().strip()
         overtime = self.overtime_spin.value()
@@ -1006,9 +1033,18 @@ class SettingsPage(QWidget):
             self.labor_status.setStyleSheet("color: #f38ba8;")
             return
 
-        Config.update_labor_settings(rate, radius, photos_dir, overtime)
+        Config.update_labor_settings(radius, photos_dir, overtime)
         self.labor_status.setText("Labor settings saved successfully.")
         self.labor_status.setStyleSheet("color: #a6e3a1;")
+
+    def _save_billing_config(self):
+        from wired_part.config import Config
+
+        cycle = self.billing_cycle_combo.currentData()
+        day = self.billing_day_spin.value()
+        Config.update_billing_settings(cycle, day)
+        self.billing_status.setText("Billing settings saved successfully.")
+        self.billing_status.setStyleSheet("color: #a6e3a1;")
 
     # ── Notebook Tab ─────────────────────────────────────────────
 

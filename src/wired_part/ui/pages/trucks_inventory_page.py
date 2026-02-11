@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -46,6 +47,12 @@ class _TruckInventoryTab(QWidget):
         self.summary_label.setStyleSheet("color: #a6adc8;")
         header.addStretch()
         header.addWidget(self.summary_label)
+
+        self.audit_btn = QPushButton("Fast Audit")
+        self.audit_btn.setToolTip("Quick card-swipe audit for this truck")
+        self.audit_btn.clicked.connect(self._on_audit)
+        header.addWidget(self.audit_btn)
+
         layout.addLayout(header)
 
         # ── Search ──────────────────────────────────────────────
@@ -68,6 +75,14 @@ class _TruckInventoryTab(QWidget):
             1, QHeaderView.Stretch
         )
         layout.addWidget(self.table)
+
+    def _on_audit(self):
+        from wired_part.ui.dialogs.audit_dialog import AuditDialog
+        dialog = AuditDialog(
+            self.repo, "truck", target_id=self.truck_id, parent=self,
+        )
+        dialog.exec()
+        self.refresh()
 
     def refresh(self):
         """Reload inventory for this truck."""

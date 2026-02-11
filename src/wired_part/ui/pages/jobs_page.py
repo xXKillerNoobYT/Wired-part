@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -51,6 +52,8 @@ class JobsPage(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
 
         # ── Toolbar ─────────────────────────────────────────────
         toolbar = QHBoxLayout()
@@ -82,9 +85,13 @@ class JobsPage(QWidget):
         self.job_list.currentItemChanged.connect(self._on_job_selected)
         splitter.addWidget(self.job_list)
 
-        # Right: job details
+        # Right: job details in scroll area
         self.detail_panel = self._build_detail_panel()
-        splitter.addWidget(self.detail_panel)
+        scroll = QScrollArea()
+        scroll.setWidget(self.detail_panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        splitter.addWidget(scroll)
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
@@ -95,6 +102,8 @@ class JobsPage(QWidget):
         """Create the right-side detail view."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
 
         # Job info
         info_group = QGroupBox("Job Details")
@@ -140,7 +149,11 @@ class JobsPage(QWidget):
         self.parts_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
-        parts_layout.addWidget(self.parts_table)
+        from PySide6.QtWidgets import QSizePolicy
+        self.parts_table.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        parts_layout.addWidget(self.parts_table, 1)
 
         self.total_cost_label = QLabel("Total: $0.00")
         self.total_cost_label.setStyleSheet("font-weight: bold; font-size: 14px;")
@@ -148,12 +161,12 @@ class JobsPage(QWidget):
 
         # Part action buttons
         part_btns = QHBoxLayout()
-        self.assign_btn = QPushButton("+ Assign Part")
+        self.assign_btn = QPushButton("Small Order")
         self.assign_btn.clicked.connect(self._on_assign_part)
         self.assign_btn.setEnabled(False)
         part_btns.addWidget(self.assign_btn)
 
-        self.remove_part_btn = QPushButton("Remove Part")
+        self.remove_part_btn = QPushButton("Return Part")
         self.remove_part_btn.clicked.connect(self._on_remove_part)
         self.remove_part_btn.setEnabled(False)
         part_btns.addWidget(self.remove_part_btn)
@@ -166,7 +179,8 @@ class JobsPage(QWidget):
         users_group = QGroupBox("Assigned Users")
         users_layout = QVBoxLayout()
         self.users_list = QListWidget()
-        self.users_list.setMaximumHeight(80)
+        self.users_list.setMinimumHeight(60)
+        self.users_list.setMaximumHeight(120)
         users_layout.addWidget(self.users_list)
 
         user_btns = QHBoxLayout()
@@ -465,8 +479,8 @@ class JobsPage(QWidget):
         job_parts = self.repo.get_job_parts(self._selected_job.id)
         jp = job_parts[rows[0].row()]
         reply = QMessageBox.question(
-            self, "Remove Part",
-            f"Remove {jp.part_number} from this job?\n"
+            self, "Return Part",
+            f"Return {jp.part_number} from this job?\n"
             f"{jp.quantity_used} units will be returned to inventory.",
             QMessageBox.Yes | QMessageBox.No,
         )
@@ -557,12 +571,13 @@ class JobsPage(QWidget):
             return
         user_id = self.current_user.id if self.current_user else None
         from wired_part.ui.dialogs.notebook_dialog import NotebookDialog
-        dialog = NotebookDialog(
+        # Store reference to prevent garbage collection; non-modal window
+        self._notebook_dialog = NotebookDialog(
             self.repo, self._selected_job.id,
             job_name=self._selected_job.name,
             user_id=user_id, parent=self
         )
-        dialog.exec()
+        self._notebook_dialog.show()
 
     def _on_work_report(self):
         if not self._selected_job:

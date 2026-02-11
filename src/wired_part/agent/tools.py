@@ -202,7 +202,7 @@ AGENT_TOOLS = [
         "function": {
             "name": "get_labor_summary",
             "description": (
-                "Get labor summary for a specific job: total hours, cost, "
+                "Get labor summary for a specific job: total hours, "
                 "breakdown by category and user."
             ),
             "parameters": {
@@ -293,6 +293,91 @@ AGENT_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_suppliers",
+            "description": "Get a list of all active suppliers.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_categories",
+            "description": "Get a list of all part categories.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_users",
+            "description": "Get a list of all active users in the system.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_job_details",
+            "description": "Get detailed information about a specific job.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_number": {
+                        "type": "string",
+                        "description": "The job number to look up",
+                    },
+                },
+                "required": ["job_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_deprecated_parts",
+            "description": (
+                "Get all parts currently in the deprecation pipeline. "
+                "Returns parts with their deprecation status and progress."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_audit_summary",
+            "description": (
+                "Get inventory audit summary: total audits, discrepancies, "
+                "last audit date. Specify type ('warehouse', 'truck', 'job')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "audit_type": {
+                        "type": "string",
+                        "enum": ["warehouse", "truck", "job"],
+                        "description": "Type of audit to summarize",
+                    },
+                },
+                "required": ["audit_type"],
             },
         },
     },

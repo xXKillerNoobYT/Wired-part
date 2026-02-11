@@ -67,10 +67,6 @@ class Config:
     ))
 
     # Labor settings (settings.json overrides defaults)
-    DEFAULT_LABOR_RATE: float = float(_runtime.get(
-        "default_labor_rate",
-        os.getenv("DEFAULT_LABOR_RATE", "0.0"),
-    ))
     GEOFENCE_RADIUS: float = float(_runtime.get(
         "geofence_radius",
         os.getenv("GEOFENCE_RADIUS", "0.5"),
@@ -106,6 +102,16 @@ class Config:
         "local_pn_prefix",
         os.getenv("LOCAL_PN_PREFIX", "LP"),
     )
+
+    # Billing
+    DEFAULT_BILLING_CYCLE: str = _runtime.get(
+        "default_billing_cycle",
+        os.getenv("DEFAULT_BILLING_CYCLE", "monthly"),
+    )
+    DEFAULT_BILLING_DAY: int = int(_runtime.get(
+        "default_billing_day",
+        os.getenv("DEFAULT_BILLING_DAY", "1"),
+    ))
 
     # Notebook template (settings.json overrides default sections)
     NOTEBOOK_SECTIONS_TEMPLATE: list = _runtime.get(
@@ -169,19 +175,28 @@ class Config:
         _save_settings(settings)
 
     @classmethod
-    def update_labor_settings(cls, rate: float, radius: float,
+    def update_labor_settings(cls, radius: float,
                               photos_dir: str, overtime: float):
         """Update labor-related settings and persist."""
-        cls.DEFAULT_LABOR_RATE = rate
         cls.GEOFENCE_RADIUS = radius
         cls.PHOTOS_DIRECTORY = photos_dir
         cls.OVERTIME_THRESHOLD = overtime
 
         settings = _load_settings()
-        settings["default_labor_rate"] = rate
         settings["geofence_radius"] = radius
         settings["photos_directory"] = photos_dir
         settings["overtime_threshold"] = overtime
+        _save_settings(settings)
+
+    @classmethod
+    def update_billing_settings(cls, cycle: str, day: int):
+        """Update billing cycle defaults and persist."""
+        cls.DEFAULT_BILLING_CYCLE = cycle
+        cls.DEFAULT_BILLING_DAY = day
+
+        settings = _load_settings()
+        settings["default_billing_cycle"] = cycle
+        settings["default_billing_day"] = day
         _save_settings(settings)
 
     @classmethod

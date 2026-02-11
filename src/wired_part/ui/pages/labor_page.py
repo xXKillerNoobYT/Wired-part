@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 
 from wired_part.database.models import LaborEntry, User
 from wired_part.database.repository import Repository
-from wired_part.utils.formatters import format_currency
 
 
 class LaborPage(QWidget):
@@ -26,7 +25,7 @@ class LaborPage(QWidget):
 
     COLUMNS = [
         "Date", "User", "Job", "Category", "Hours",
-        "Rate", "Cost", "Description",
+        "Description",
     ]
 
     def __init__(self, repo: Repository, current_user: User = None):
@@ -39,6 +38,8 @@ class LaborPage(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
 
         # ── Toolbar ───────────────────────────────────────────────
         toolbar = QHBoxLayout()
@@ -101,7 +102,7 @@ class LaborPage(QWidget):
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(
-            7, QHeaderView.Stretch
+            5, QHeaderView.Stretch  # Description column
         )
         layout.addWidget(self.table, 1)
 
@@ -114,12 +115,6 @@ class LaborPage(QWidget):
             "font-weight: bold; font-size: 14px;"
         )
         summary_layout.addWidget(self.total_hours_label)
-
-        self.total_cost_label = QLabel("Total Cost: $0.00")
-        self.total_cost_label.setStyleSheet(
-            "font-weight: bold; font-size: 14px;"
-        )
-        summary_layout.addWidget(self.total_cost_label)
 
         self.entry_count_label = QLabel("Entries: 0")
         summary_layout.addWidget(self.entry_count_label)
@@ -170,7 +165,6 @@ class LaborPage(QWidget):
                 except (ValueError, TypeError):
                     date_str = str(entry.start_time)[:16]
 
-            cost = (entry.hours or 0) * (entry.rate_per_hour or 0)
             job_label = entry.job_number or ""
 
             cells = [
@@ -181,15 +175,10 @@ class LaborPage(QWidget):
                 QTableWidgetItem(
                     f"{entry.hours:.2f}" if entry.hours else "—"
                 ),
-                QTableWidgetItem(
-                    format_currency(entry.rate_per_hour)
-                    if entry.rate_per_hour else "—"
-                ),
-                QTableWidgetItem(format_currency(cost)),
                 QTableWidgetItem(entry.description or ""),
             ]
             for col, cell in enumerate(cells):
-                if col in (4, 5, 6):
+                if col == 4:
                     cell.setTextAlignment(
                         Qt.AlignRight | Qt.AlignVCenter
                     )
@@ -203,14 +192,7 @@ class LaborPage(QWidget):
     def _update_summary(self):
         """Update summary labels."""
         total_hours = sum(e.hours or 0 for e in self._entries)
-        total_cost = sum(
-            (e.hours or 0) * (e.rate_per_hour or 0)
-            for e in self._entries
-        )
         self.total_hours_label.setText(f"Total Hours: {total_hours:.2f}")
-        self.total_cost_label.setText(
-            f"Total Cost: {format_currency(total_cost)}"
-        )
         self.entry_count_label.setText(f"Entries: {len(self._entries)}")
 
     def _update_clock_status(self):

@@ -406,7 +406,6 @@ class ClockInDialog(QDialog):
                 user_id=self.user_id,
                 job_id=job_id,
                 category=self.category_selector.currentText(),
-                rate=Config.DEFAULT_LABOR_RATE,
                 lat=lat,
                 lon=lon,
                 photos=photos_json,

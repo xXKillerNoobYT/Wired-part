@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -36,6 +37,8 @@ class TrucksPage(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -82,10 +85,11 @@ class TrucksPage(QWidget):
         left_layout.addWidget(self.truck_list)
         splitter.addWidget(left)
 
-        # Right: detail tabs
+        # Right: detail tabs in scroll area
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(8, 8, 8, 8)
 
         # Truck info
         self.info_label = QLabel("Select a truck")
@@ -129,8 +133,13 @@ class TrucksPage(QWidget):
         self.history_table.horizontalHeader().setStretchLastSection(True)
         self.detail_tabs.addTab(self.history_table, "Transfer History")
 
-        right_layout.addWidget(self.detail_tabs)
-        splitter.addWidget(right)
+        right_layout.addWidget(self.detail_tabs, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidget(right)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        splitter.addWidget(scroll)
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
