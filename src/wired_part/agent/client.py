@@ -19,9 +19,10 @@ class LMStudioClient:
             base_url=Config.LM_STUDIO_BASE_URL,
             api_key=Config.LM_STUDIO_API_KEY,
             timeout=httpx.Timeout(
-                total=300.0,
                 connect=10.0,
                 read=float(Config.LM_STUDIO_TIMEOUT),
+                write=300.0,
+                pool=300.0,
             ),
         )
         self.tool_executor = tool_executor
