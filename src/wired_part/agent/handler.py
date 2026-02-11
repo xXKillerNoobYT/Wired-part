@@ -34,6 +34,9 @@ class ToolHandler:
             "get_labor_summary": self._get_labor_summary,
             "get_active_clockins": self._get_active_clockins,
             "search_notes": self._search_notes,
+            "get_pending_orders": self._get_pending_orders,
+            "get_orders_summary": self._get_orders_summary,
+            "suggest_reorder": self._suggest_reorder,
         }
 
         handler = dispatch.get(tool_name)
@@ -283,3 +286,57 @@ class ToolHandler:
                 "updated_at": str(page.updated_at or ""),
             })
         return results
+
+    def _get_pending_orders(self) -> list[dict]:
+        orders = self.repo.get_all_purchase_orders()
+        pending = [
+            o for o in orders
+            if o.status in ("draft", "submitted", "partial")
+        ]
+        return [
+            {
+                "order_number": o.order_number,
+                "supplier": o.supplier_name,
+                "status": o.status,
+                "item_count": o.item_count,
+                "total_cost": format_currency(o.total_cost),
+                "created_by": o.created_by_name,
+                "created_at": str(o.created_at or ""),
+                "notes": o.notes or "",
+            }
+            for o in pending
+        ]
+
+    def _get_orders_summary(self) -> dict:
+        summary = self.repo.get_orders_summary()
+        return {
+            "draft_orders": summary.get("draft_orders", 0),
+            "pending_orders": summary.get("pending_orders", 0),
+            "awaiting_receipt": summary.get("awaiting_receipt", 0),
+            "open_returns": summary.get("open_returns", 0),
+            "total_spent": format_currency(
+                summary.get("total_spent", 0)
+            ),
+        }
+
+    def _suggest_reorder(self) -> list[dict]:
+        """Suggest parts to reorder based on low stock levels."""
+        low_stock = self.repo.get_low_stock_parts()
+        suggestions = []
+        for part in low_stock:
+            deficit = part.min_quantity - part.quantity
+            # Suggest ordering 2x the deficit to build buffer
+            suggested_qty = max(deficit * 2, part.min_quantity)
+            suggestions.append({
+                "part_number": part.part_number,
+                "description": part.description,
+                "current_stock": part.quantity,
+                "min_quantity": part.min_quantity,
+                "deficit": deficit,
+                "suggested_order_qty": suggested_qty,
+                "estimated_cost": format_currency(
+                    suggested_qty * part.unit_cost
+                ),
+                "supplier": part.supplier or "Not specified",
+            })
+        return suggestions

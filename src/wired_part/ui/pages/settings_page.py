@@ -3,6 +3,7 @@
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -514,10 +515,10 @@ class SettingsPage(QWidget):
         layout.addLayout(toolbar)
 
         self.suppliers_table = QTableWidget()
-        self.suppliers_table.setColumnCount(7)
+        self.suppliers_table.setColumnCount(9)
         self.suppliers_table.setHorizontalHeaderLabels(
             ["ID", "Name", "Contact", "Email", "Phone",
-             "Preference", "Active"]
+             "Preference", "Supply House", "Hours", "Active"]
         )
         self.suppliers_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.suppliers_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -550,6 +551,14 @@ class SettingsPage(QWidget):
             )
             self.suppliers_table.setItem(
                 row, 6,
+                QTableWidgetItem("Yes" if s.is_supply_house else ""),
+            )
+            self.suppliers_table.setItem(
+                row, 7,
+                QTableWidgetItem(s.operating_hours or ""),
+            )
+            self.suppliers_table.setItem(
+                row, 8,
                 QTableWidgetItem("Yes" if s.is_active else "No"),
             )
 

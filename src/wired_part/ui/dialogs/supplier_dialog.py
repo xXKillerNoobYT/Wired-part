@@ -3,6 +3,7 @@
 from typing import Optional
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -75,6 +76,21 @@ class SupplierDialog(QDialog):
         )
         form.addRow("Delivery Schedule:", self.delivery_input)
 
+        self.supply_house_cb = QCheckBox("This is a local supply house")
+        self.supply_house_cb.setToolTip(
+            "Check if this supplier is a local counter/pickup location "
+            "(e.g., electrical supply house, hardware store)"
+        )
+        self.supply_house_cb.toggled.connect(self._on_supply_house_toggled)
+        form.addRow("Supply House:", self.supply_house_cb)
+
+        self.hours_input = QLineEdit()
+        self.hours_input.setPlaceholderText(
+            "e.g., Mon-Fri 6am-5pm, Sat 7am-12pm"
+        )
+        self.hours_input.setEnabled(False)
+        form.addRow("Operating Hours:", self.hours_input)
+
         self.notes_input = QTextEdit()
         self.notes_input.setMaximumHeight(80)
         form.addRow("Notes:", self.notes_input)
@@ -88,6 +104,9 @@ class SupplierDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _on_supply_house_toggled(self, checked):
+        self.hours_input.setEnabled(checked)
+
     def _populate(self, supplier: Supplier):
         self.name_input.setText(supplier.name)
         self.contact_input.setText(supplier.contact_name or "")
@@ -96,6 +115,8 @@ class SupplierDialog(QDialog):
         self.address_input.setText(supplier.address or "")
         self.preference_input.setValue(supplier.preference_score or 50)
         self.delivery_input.setText(supplier.delivery_schedule or "")
+        self.supply_house_cb.setChecked(bool(supplier.is_supply_house))
+        self.hours_input.setText(supplier.operating_hours or "")
         self.notes_input.setPlainText(supplier.notes or "")
 
     def _on_save(self):
@@ -115,6 +136,8 @@ class SupplierDialog(QDialog):
             address=self.address_input.text().strip(),
             preference_score=self.preference_input.value(),
             delivery_schedule=self.delivery_input.text().strip(),
+            is_supply_house=1 if self.supply_house_cb.isChecked() else 0,
+            operating_hours=self.hours_input.text().strip(),
             notes=self.notes_input.toPlainText().strip(),
         )
 

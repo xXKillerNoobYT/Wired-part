@@ -84,6 +84,29 @@ class Config:
         os.getenv("OVERTIME_THRESHOLD", "8.0"),
     ))
 
+    # Orders & Returns
+    ORDER_NUMBER_PREFIX: str = _runtime.get(
+        "order_number_prefix",
+        os.getenv("ORDER_NUMBER_PREFIX", "PO"),
+    )
+    RA_NUMBER_PREFIX: str = _runtime.get(
+        "ra_number_prefix",
+        os.getenv("RA_NUMBER_PREFIX", "RA"),
+    )
+    AUTO_CLOSE_RECEIVED_ORDERS: bool = _runtime.get(
+        "auto_close_received_orders", True
+    )
+
+    # Parts Catalog
+    PDFS_DIRECTORY: str = _runtime.get(
+        "pdfs_directory",
+        os.getenv("PDFS_DIRECTORY", str(_PROJECT_ROOT / "data" / "pdfs")),
+    )
+    LOCAL_PN_PREFIX: str = _runtime.get(
+        "local_pn_prefix",
+        os.getenv("LOCAL_PN_PREFIX", "LP"),
+    )
+
     # Notebook template (settings.json overrides default sections)
     NOTEBOOK_SECTIONS_TEMPLATE: list = _runtime.get(
         "notebook_sections_template",

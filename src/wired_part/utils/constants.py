@@ -1,7 +1,7 @@
 """Application-wide constants."""
 
 APP_NAME = "Wired-Part"
-APP_VERSION = "6.0.0"
+APP_VERSION = "9.0.0"
 APP_ORGANIZATION = "WeirdToo LLC"
 
 # Job statuses
@@ -54,6 +54,9 @@ PERMISSION_KEYS = [
     "parts_import",
     "parts_export",
     "parts_lists",
+    "parts_brands",
+    "parts_variants",
+    "parts_qr_tags",
     # Job actions
     "jobs_add",
     "jobs_edit",
@@ -109,6 +112,9 @@ PERMISSION_LABELS = {
     "parts_import": "Import Parts",
     "parts_export": "Export Parts",
     "parts_lists": "Manage Parts Lists",
+    "parts_brands": "Manage Brands",
+    "parts_variants": "Manage Part Variants",
+    "parts_qr_tags": "Manage QR Tags",
     "jobs_add": "Add Jobs",
     "jobs_edit": "Edit Jobs",
     "jobs_delete": "Delete Jobs",
@@ -164,7 +170,7 @@ DEFAULT_HAT_PERMISSIONS: dict[str, list[str]] = {
         "tab_trucks_inventory", "tab_jobs_inventory", "tab_job_tracking",
         "tab_trucks", "tab_labor", "tab_orders", "tab_settings",
         "parts_add", "parts_edit", "parts_import", "parts_export",
-        "parts_lists",
+        "parts_lists", "parts_brands", "parts_variants", "parts_qr_tags",
         "jobs_add", "jobs_edit", "jobs_assign", "jobs_billing",
         "jobs_notes", "jobs_report",
         "labor_view_all", "labor_manual_entry",
@@ -179,6 +185,7 @@ DEFAULT_HAT_PERMISSIONS: dict[str, list[str]] = {
         "tab_trucks_inventory", "tab_jobs_inventory", "tab_job_tracking",
         "tab_trucks", "tab_labor", "tab_orders",
         "parts_add", "parts_edit", "parts_export", "parts_lists",
+        "parts_brands", "parts_variants",
         "jobs_add", "jobs_edit", "jobs_assign", "jobs_billing",
         "jobs_notes", "jobs_report",
         "labor_clock_in", "labor_clock_out", "labor_manual_entry",
@@ -190,7 +197,7 @@ DEFAULT_HAT_PERMISSIONS: dict[str, list[str]] = {
         "tab_dashboard", "tab_parts_catalog", "tab_warehouse",
         "tab_trucks_inventory", "tab_jobs_inventory", "tab_job_tracking",
         "tab_trucks", "tab_labor", "tab_orders",
-        "parts_add", "parts_edit", "parts_lists",
+        "parts_add", "parts_edit", "parts_lists", "parts_qr_tags",
         "jobs_edit", "jobs_assign", "jobs_notes",
         "labor_clock_in", "labor_clock_out", "labor_manual_entry",
         "labor_view_all",
@@ -308,3 +315,51 @@ MIN_WINDOW_HEIGHT = 600
 AUDIT_AGENT_INTERVAL_DEFAULT = 30
 ADMIN_AGENT_INTERVAL_DEFAULT = 60
 REMINDER_AGENT_INTERVAL_DEFAULT = 15
+
+# ── Parts Catalog types ──────────────────────────────────────────
+PART_TYPES = ["general", "specific"]
+
+PART_TYPE_LABELS = {
+    "general": "General (Commodity)",
+    "specific": "Specific (Branded)",
+}
+
+# Suggested subcategories grouped by category name
+COMMON_SUBCATEGORIES: dict[str, list[str]] = {
+    "Switches & Outlets": [
+        "GFCI", "Tamper-Resistant", "Duplex", "Decorator",
+        "Toggle", "Dimmer", "Fan Control", "Smart Switch",
+    ],
+    "Wire & Cable": [
+        "NM-B (Romex)", "THHN", "UF-B", "MC Cable",
+        "BX Cable", "Low Voltage", "Coax",
+    ],
+    "Lighting": [
+        "Recessed", "Surface Mount", "Pendant", "Track",
+        "Emergency", "LED Driver", "Flood/Spot",
+    ],
+    "Breakers & Fuses": [
+        "Standard", "GFCI", "AFCI", "Dual Function", "GFPE",
+    ],
+    "Conduit & Fittings": [
+        "EMT", "Rigid", "PVC", "Flex", "Liquidtight",
+    ],
+    "Boxes & Enclosures": [
+        "Old Work", "New Work", "Weatherproof", "Junction",
+    ],
+    "Connectors & Terminals": [
+        "Wire Nut", "Push-In", "Crimp", "Lug",
+    ],
+}
+
+# Common color options for general parts
+COMMON_COLORS = [
+    "White", "Ivory", "Light Almond", "Black",
+    "Gray", "Brown", "Red", "Blue",
+]
+
+# Common type/style options for general parts
+COMMON_STYLES = [
+    "Decora", "Standard", "Commercial", "Residential",
+    "Industrial", "Tamper-Resistant", "Weather-Resistant",
+]

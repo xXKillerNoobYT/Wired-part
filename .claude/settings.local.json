@@ -11,7 +11,8 @@
       "Bash(python:*)",
       "Bash(ls -la \"C:\\\\Users\\\\weird\\\\OneDrive\\\\Documents\\\\GitHub\\\\Wired-part\\\\src\\\\wired_part\\\\ui\\\\dialogs\"\" 2>&1 | grep -v \"^total \")",
       "Bash(ls:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(xargs:*)"
     ]
   }
 }

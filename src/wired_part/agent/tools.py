@@ -251,4 +251,49 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pending_orders",
+            "description": (
+                "Get all pending purchase orders (draft, submitted, or "
+                "partially received). Includes supplier, item count, "
+                "total cost, and status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_orders_summary",
+            "description": (
+                "Get a quick summary of orders: counts by status, "
+                "total spent, items awaiting receipt, open returns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_reorder",
+            "description": (
+                "Suggest parts that should be reordered based on current "
+                "stock levels, minimum quantities, and recent consumption. "
+                "Returns a list of parts needing reorder with suggested "
+                "quantities."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]

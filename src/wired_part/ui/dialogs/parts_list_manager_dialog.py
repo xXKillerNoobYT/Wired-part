@@ -1,6 +1,7 @@
 """Parts List Manager — browse, create, edit, and delete parts lists."""
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -27,9 +28,10 @@ class PartsListManagerDialog(QDialog):
     LIST_COLUMNS = ["Name", "Type", "Job", "Items", "Created By"]
     ITEM_COLUMNS = ["Part #", "Description", "Qty", "Unit Cost", "Line Total"]
 
-    def __init__(self, repo: Repository, parent=None):
+    def __init__(self, repo: Repository, current_user=None, parent=None):
         super().__init__(parent)
         self.repo = repo
+        self.current_user = current_user
         self.setWindowTitle("Parts Lists Manager")
         self.resize(1000, 600)
         self._lists: list[PartsList] = []
@@ -95,10 +97,24 @@ class PartsListManagerDialog(QDialog):
         self.lists_table.doubleClicked.connect(self._on_manage_items)
         left_layout.addWidget(self.lists_table)
 
+        # Left bottom buttons
+        left_btn_row = QHBoxLayout()
+
         manage_btn = QPushButton("Manage Items...")
         manage_btn.clicked.connect(self._on_manage_items)
-        left_layout.addWidget(manage_btn)
+        left_btn_row.addWidget(manage_btn)
         self.manage_btn = manage_btn
+
+        self.shortfall_btn = QPushButton("Check Shortfall")
+        self.shortfall_btn.setToolTip(
+            "Check if warehouse has enough stock to fill this list"
+        )
+        self.shortfall_btn.setStyleSheet("color: #f9e2af; font-weight: bold;")
+        self.shortfall_btn.clicked.connect(self._on_check_shortfall)
+        self.shortfall_btn.setEnabled(False)
+        left_btn_row.addWidget(self.shortfall_btn)
+
+        left_layout.addLayout(left_btn_row)
 
         splitter.addWidget(left)
 
@@ -168,9 +184,9 @@ class PartsListManagerDialog(QDialog):
             cells = [
                 QTableWidgetItem(pl.name),
                 QTableWidgetItem(type_label),
-                QTableWidgetItem(pl.job_number or "—"),
+                QTableWidgetItem(pl.job_number or "--"),
                 QTableWidgetItem(str(item_count)),
-                QTableWidgetItem(pl.created_by_name or "—"),
+                QTableWidgetItem(pl.created_by_name or "--"),
             ]
             for col, cell in enumerate(cells):
                 if col == 3:  # Right-align item count
@@ -184,6 +200,7 @@ class PartsListManagerDialog(QDialog):
         self.edit_btn.setEnabled(False)
         self.delete_btn.setEnabled(False)
         self.manage_btn.setEnabled(False)
+        self.shortfall_btn.setEnabled(False)
 
     def _selected_list(self) -> PartsList | None:
         """Return the currently selected parts list, or None."""
@@ -199,6 +216,7 @@ class PartsListManagerDialog(QDialog):
         self.edit_btn.setEnabled(has_selection)
         self.delete_btn.setEnabled(has_selection)
         self.manage_btn.setEnabled(has_selection)
+        self.shortfall_btn.setEnabled(has_selection)
 
         if not pl:
             self.items_table.setRowCount(0)
@@ -229,9 +247,97 @@ class PartsListManagerDialog(QDialog):
 
         count = len(items)
         self.items_total_label.setText(
-            f"{count} item{'s' if count != 1 else ''} — "
+            f"{count} item{'s' if count != 1 else ''} -- "
             f"Total: {format_currency(total)}"
         )
+
+    def _on_check_shortfall(self):
+        """Check warehouse stock shortfalls for the selected list."""
+        pl = self._selected_list()
+        if not pl:
+            return
+
+        shortfalls = self.repo.check_shortfall(pl.id)
+
+        if not shortfalls:
+            QMessageBox.information(
+                self, "No Shortfalls",
+                f"Warehouse has sufficient stock for all items in "
+                f"'{pl.name}'.",
+            )
+            return
+
+        # Build shortfall report
+        lines = [
+            f"Shortfall detected for {len(shortfalls)} item(s) "
+            f"in '{pl.name}':\n"
+        ]
+        total_shortfall_cost = 0.0
+        for sf in shortfalls:
+            cost = sf["shortfall"] * sf["unit_cost"]
+            total_shortfall_cost += cost
+            lines.append(
+                f"  {sf['part_number']} -- {sf['description']}\n"
+                f"    Need: {sf['required']}  |  "
+                f"In Stock: {sf['in_stock']}  |  "
+                f"Short: {sf['shortfall']}  "
+                f"({format_currency(cost)})"
+            )
+
+        lines.append(
+            f"\nEstimated shortfall cost: "
+            f"{format_currency(total_shortfall_cost)}"
+        )
+        lines.append(
+            "\nWould you like to generate a purchase order "
+            "for the shortfall items?"
+        )
+
+        reply = QMessageBox.question(
+            self, "Shortfall Detected",
+            "\n".join(lines),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            self._create_shortfall_order(pl, shortfalls)
+
+    def _create_shortfall_order(self, pl, shortfalls):
+        """Create a draft PO for shortfall items."""
+        from wired_part.ui.dialogs.order_from_list_dialog import (
+            OrderFromListDialog,
+        )
+        from wired_part.database.models import PurchaseOrderItem
+
+        # Open the order-from-list dialog pre-set to this list
+        dlg = OrderFromListDialog(
+            self.repo, current_user=self.current_user, parent=self
+        )
+
+        # Find and select the matching list
+        for i in range(dlg.list_combo.count()):
+            if dlg.list_combo.itemData(i) == pl.id:
+                dlg.list_combo.setCurrentIndex(i)
+                break
+
+        # Override preview items with only shortfall quantities
+        dlg._preview_items.clear()
+        for sf in shortfalls:
+            dlg._preview_items.append({
+                "part_id": sf["part_id"],
+                "part_number": sf["part_number"],
+                "description": sf["description"],
+                "qty": sf["shortfall"],  # Only order the shortfall
+                "cost": sf["unit_cost"],
+            })
+        dlg._refresh_preview()
+
+        if dlg.exec():
+            QMessageBox.information(
+                self, "Order Created",
+                "Shortfall purchase order created as draft.\n"
+                "Go to Pending Orders to review and submit.",
+            )
 
     def _on_new_list(self):
         """Create a new parts list."""

@@ -69,6 +69,8 @@ class DashboardPage(QWidget):
         self.trucks_card = SummaryCard("Active Trucks")
         self.pending_card = SummaryCard("Pending Transfers")
         self.hours_card = SummaryCard("Hours This Week")
+        self.orders_card = SummaryCard("Pending Orders")
+        self.returns_card = SummaryCard("Open Returns")
 
         cards_layout.addWidget(self.parts_card, 0, 0)
         cards_layout.addWidget(self.value_card, 0, 1)
@@ -77,6 +79,8 @@ class DashboardPage(QWidget):
         cards_layout.addWidget(self.jobs_card, 1, 0)
         cards_layout.addWidget(self.trucks_card, 1, 1)
         cards_layout.addWidget(self.pending_card, 1, 2)
+        cards_layout.addWidget(self.orders_card, 1, 3)
+        cards_layout.addWidget(self.returns_card, 2, 0)
 
         layout.addLayout(cards_layout)
 
@@ -243,6 +247,32 @@ class DashboardPage(QWidget):
                 )
         else:
             self.my_truck_label.setText("No truck assigned to you")
+
+        # Orders summary
+        try:
+            order_summary = self.repo.get_orders_summary()
+            pending_count = order_summary.get("pending_orders", 0)
+            awaiting = order_summary.get("awaiting_receipt", 0)
+            self.orders_card.set_value(f"{pending_count}")
+            if awaiting > 0:
+                self.orders_card.title_label.setText(
+                    f"Pending Orders ({awaiting} awaiting)"
+                )
+            else:
+                self.orders_card.title_label.setText("Pending Orders")
+        except Exception:
+            self.orders_card.set_value("—")
+
+        # Open returns
+        try:
+            open_returns = self.repo.get_all_return_authorizations()
+            active_returns = [
+                r for r in open_returns
+                if r.status in ("initiated", "picked_up")
+            ]
+            self.returns_card.set_value(str(len(active_returns)))
+        except Exception:
+            self.returns_card.set_value("—")
 
         # Notifications
         self.notif_list.clear()

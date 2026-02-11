@@ -20,6 +20,25 @@ def _load_theme(app: QApplication):
         app.setStyleSheet(qss_file.read_text(encoding="utf-8"))
 
 
+def _login(repo) -> "User | None":
+    """Show the login dialog (or first-run setup) and return the user.
+
+    Returns ``None`` if the user cancels the dialog.
+    """
+    from wired_part.ui.login_dialog import FirstRunDialog, LoginDialog
+
+    if repo.user_count() == 0:
+        first_run = FirstRunDialog(repo)
+        if first_run.exec() != FirstRunDialog.Accepted:
+            return None
+        return first_run.created_user
+
+    login = LoginDialog(repo)
+    if login.exec() != LoginDialog.Accepted:
+        return None
+    return login.authenticated_user
+
+
 def main():
     """Launch the Wired-Part application."""
     # Initialize database
@@ -40,29 +59,35 @@ def main():
 
     # Import here to avoid circular imports and let DB init first
     from wired_part.database.repository import Repository
-    from wired_part.ui.login_dialog import FirstRunDialog, LoginDialog
     from wired_part.ui.main_window import MainWindow
 
     repo = Repository(db)
 
-    # First-run setup: create admin if no users exist
-    if repo.user_count() == 0:
-        first_run = FirstRunDialog(repo)
-        if first_run.exec() != FirstRunDialog.Accepted:
+    # Login loop — re-shows the login dialog after logout
+    while True:
+        current_user = _login(repo)
+        if current_user is None:
+            # User cancelled the login dialog
             sys.exit(0)
-        current_user = first_run.created_user
-    else:
-        # Login screen
-        login = LoginDialog(repo)
-        if login.exec() != LoginDialog.Accepted:
-            sys.exit(0)
-        current_user = login.authenticated_user
 
-    # Launch main window
-    window = MainWindow(db, current_user)
-    window.show()
+        window = MainWindow(db, current_user)
 
-    sys.exit(app.exec())
+        # Track whether the user logged out (vs. closed the window)
+        logout_flag = {"triggered": False}
+
+        def _handle_logout():
+            logout_flag["triggered"] = True
+
+        window.logout_requested.connect(_handle_logout)
+        window.show()
+
+        app.exec()
+
+        if not logout_flag["triggered"]:
+            # User closed the window normally — exit the app
+            break
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

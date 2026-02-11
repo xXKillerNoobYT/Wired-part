@@ -1,6 +1,6 @@
 """Database schema definition, initialization, and migrations."""
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 # Each statement is a separate string to avoid executescript issues
 _SCHEMA_STATEMENTS = [
@@ -18,18 +18,32 @@ _SCHEMA_STATEMENTS = [
     # Parts table (warehouse inventory)
     """CREATE TABLE IF NOT EXISTS parts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        part_number TEXT NOT NULL UNIQUE,
-        description TEXT NOT NULL,
+        part_number TEXT DEFAULT '',
+        description TEXT DEFAULT '',
         quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
         location TEXT,
         category_id INTEGER,
         unit_cost REAL DEFAULT 0.00 CHECK (unit_cost >= 0),
         min_quantity INTEGER DEFAULT 0 CHECK (min_quantity >= 0),
+        max_quantity INTEGER DEFAULT 0 CHECK (max_quantity >= 0),
         supplier TEXT,
         notes TEXT,
+        name TEXT DEFAULT '',
+        part_type TEXT NOT NULL DEFAULT 'general'
+            CHECK (part_type IN ('general', 'specific')),
+        brand_id INTEGER,
+        brand_part_number TEXT DEFAULT '',
+        local_part_number TEXT DEFAULT '',
+        image_path TEXT DEFAULT '',
+        subcategory TEXT DEFAULT '',
+        color_options TEXT DEFAULT '[]',
+        type_style TEXT DEFAULT '[]',
+        has_qr_tag INTEGER NOT NULL DEFAULT 0,
+        pdfs TEXT DEFAULT '[]',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
+        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
+        FOREIGN KEY (brand_id) REFERENCES brands(id) ON DELETE SET NULL
     )""",
 
     # Suppliers table
@@ -44,9 +58,47 @@ _SCHEMA_STATEMENTS = [
         preference_score INTEGER NOT NULL DEFAULT 50
             CHECK (preference_score BETWEEN 0 AND 100),
         delivery_schedule TEXT,
+        is_supply_house INTEGER NOT NULL DEFAULT 0,
+        operating_hours TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+
+    # Brands table (v8)
+    """CREATE TABLE IF NOT EXISTS brands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        website TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+
+    # Part-supplier links: many-to-many for specific parts (v8)
+    """CREATE TABLE IF NOT EXISTS part_suppliers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        part_id INTEGER NOT NULL,
+        supplier_id INTEGER NOT NULL,
+        supplier_part_number TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE CASCADE,
+        UNIQUE(part_id, supplier_id)
+    )""",
+
+    # Part variants: type/style + color variants for parts (v9)
+    """CREATE TABLE IF NOT EXISTS part_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        part_id INTEGER NOT NULL,
+        type_style TEXT NOT NULL DEFAULT '',
+        color_finish TEXT NOT NULL,
+        brand_part_number TEXT DEFAULT '',
+        image_path TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        UNIQUE(part_id, type_style, color_finish)
     )""",
 
     # Parts lists (templates and specific instances)
@@ -448,6 +500,16 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_rai_ra ON return_authorization_items(ra_id)",
     "CREATE INDEX IF NOT EXISTS idx_rai_part ON return_authorization_items(part_id)",
 
+    # v8 indexes
+    "CREATE INDEX IF NOT EXISTS idx_parts_part_type ON parts(part_type)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_brand ON parts(brand_id)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_local_pn ON parts(local_part_number)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_qr_tag ON parts(has_qr_tag)",
+    "CREATE INDEX IF NOT EXISTS idx_brands_name ON brands(name)",
+    "CREATE INDEX IF NOT EXISTS idx_part_suppliers_part ON part_suppliers(part_id)",
+    "CREATE INDEX IF NOT EXISTS idx_part_suppliers_supplier ON part_suppliers(supplier_id)",
+    "CREATE INDEX IF NOT EXISTS idx_part_variants_part ON part_variants(part_id)",
+
     # ── Triggers ─────────────────────────────────────────────────
     """CREATE TRIGGER IF NOT EXISTS update_jobs_timestamp AFTER UPDATE ON jobs
     WHEN NEW.updated_at = OLD.updated_at BEGIN
@@ -486,6 +548,11 @@ _SCHEMA_STATEMENTS = [
     WHEN NEW.updated_at = OLD.updated_at BEGIN
         UPDATE return_authorizations SET updated_at = CURRENT_TIMESTAMP
         WHERE id = NEW.id;
+    END""",
+
+    """CREATE TRIGGER IF NOT EXISTS update_brands_timestamp AFTER UPDATE ON brands
+    WHEN NEW.updated_at = OLD.updated_at BEGIN
+        UPDATE brands SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
     END""",
 
     # Record schema version
@@ -877,6 +944,39 @@ def _seed_default_hats(conn):
         )
 
 
+def _refresh_system_hat_permissions(conn):
+    """Ensure all system hats have the latest default permissions.
+
+    Merges any new permission keys from DEFAULT_HAT_PERMISSIONS into
+    the stored hat JSON.  This keeps migrated databases in sync when
+    new features add new permission keys.
+    """
+    import json
+    from wired_part.utils.constants import HAT_NAMES, DEFAULT_HAT_PERMISSIONS
+
+    for hat_name in HAT_NAMES:
+        row = conn.execute(
+            "SELECT id, permissions FROM hats WHERE name = ? AND is_system = 1",
+            (hat_name,),
+        ).fetchone()
+        if not row:
+            continue
+
+        current = json.loads(row["permissions"]) if row["permissions"] else []
+        defaults = DEFAULT_HAT_PERMISSIONS.get(hat_name, [])
+        merged = list(current)
+        updated = False
+        for perm in defaults:
+            if perm not in merged:
+                merged.append(perm)
+                updated = True
+        if updated:
+            conn.execute(
+                "UPDATE hats SET permissions = ? WHERE id = ?",
+                (json.dumps(merged), row["id"]),
+            )
+
+
 def _assign_hats_to_existing_admins(conn):
     """Auto-assign Admin hat to existing users with role='admin'."""
     admin_hat = conn.execute(
@@ -1079,10 +1179,260 @@ def _seed_order_permissions(conn):
             )
 
 
+# ── v7 migration: supply house support on suppliers ─────────────
+_MIGRATION_V7_STATEMENTS = [
+    "ALTER TABLE suppliers ADD COLUMN is_supply_house INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE suppliers ADD COLUMN operating_hours TEXT",
+    # Update schema version
+    "INSERT OR REPLACE INTO schema_version (version) VALUES (7)",
+]
+
+
+def _migrate_v6_to_v7(conn):
+    """Upgrade schema from v6 to v7 — add supply house columns."""
+    for stmt in _MIGRATION_V7_STATEMENTS:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass  # Column may already exist
+
+
+    # ── Migration from v7 → v8: Parts Catalog overhaul ─────────────
+_MIGRATION_V8_ALTER_STATEMENTS = [
+    "ALTER TABLE parts ADD COLUMN part_type TEXT NOT NULL DEFAULT 'general'",
+    "ALTER TABLE parts ADD COLUMN brand_id INTEGER REFERENCES brands(id) ON DELETE SET NULL",
+    "ALTER TABLE parts ADD COLUMN brand_part_number TEXT DEFAULT ''",
+    "ALTER TABLE parts ADD COLUMN local_part_number TEXT DEFAULT ''",
+    "ALTER TABLE parts ADD COLUMN image_path TEXT DEFAULT ''",
+    "ALTER TABLE parts ADD COLUMN subcategory TEXT DEFAULT ''",
+    "ALTER TABLE parts ADD COLUMN color_options TEXT DEFAULT '[]'",
+    "ALTER TABLE parts ADD COLUMN type_style TEXT DEFAULT '[]'",
+    "ALTER TABLE parts ADD COLUMN has_qr_tag INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE parts ADD COLUMN name TEXT DEFAULT ''",
+    "ALTER TABLE parts ADD COLUMN max_quantity INTEGER DEFAULT 0",
+    "ALTER TABLE parts ADD COLUMN pdfs TEXT DEFAULT '[]'",
+]
+
+_MIGRATION_V8_STATEMENTS = [
+    # New tables
+    """CREATE TABLE IF NOT EXISTS brands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        website TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+
+    """CREATE TABLE IF NOT EXISTS part_suppliers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        part_id INTEGER NOT NULL,
+        supplier_id INTEGER NOT NULL,
+        supplier_part_number TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE CASCADE,
+        UNIQUE(part_id, supplier_id)
+    )""",
+
+    """CREATE TABLE IF NOT EXISTS part_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        part_id INTEGER NOT NULL,
+        color_finish TEXT NOT NULL,
+        brand_part_number TEXT DEFAULT '',
+        image_path TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+        UNIQUE(part_id, color_finish)
+    )""",
+
+    # Indexes
+    "CREATE INDEX IF NOT EXISTS idx_parts_part_type ON parts(part_type)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_brand ON parts(brand_id)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_local_pn ON parts(local_part_number)",
+    "CREATE INDEX IF NOT EXISTS idx_parts_qr_tag ON parts(has_qr_tag)",
+    "CREATE INDEX IF NOT EXISTS idx_brands_name ON brands(name)",
+    "CREATE INDEX IF NOT EXISTS idx_part_suppliers_part ON part_suppliers(part_id)",
+    "CREATE INDEX IF NOT EXISTS idx_part_suppliers_supplier ON part_suppliers(supplier_id)",
+    "CREATE INDEX IF NOT EXISTS idx_part_variants_part ON part_variants(part_id)",
+
+    # Trigger
+    """CREATE TRIGGER IF NOT EXISTS update_brands_timestamp AFTER UPDATE ON brands
+    WHEN NEW.updated_at = OLD.updated_at BEGIN
+        UPDATE brands SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+    END""",
+
+    # Update schema version
+    "INSERT OR REPLACE INTO schema_version (version) VALUES (8)",
+]
+
+
+def _migrate_v7_to_v8(conn):
+    """Upgrade schema from v7 to v8 — Parts Catalog overhaul.
+
+    Adds brands table, part_suppliers table, part_variants table,
+    and 10 new columns on parts.
+
+    Order matters:
+    1. Create new tables (brands must exist before parts.brand_id FK)
+    2. ALTER TABLE parts to add new columns (must exist before indexes)
+    3. Create indexes, triggers, and update schema version
+    """
+    # 1. Create new tables only (not indexes yet — columns don't exist)
+    for stmt in _MIGRATION_V8_STATEMENTS:
+        # Skip indexes on parts columns that don't exist yet
+        if stmt.strip().startswith("CREATE INDEX") and "parts(" in stmt:
+            continue
+        conn.execute(stmt)
+
+    # 2. ALTER TABLE for each new column — wrapped individually so
+    #    already-existing columns don't block the rest
+    for stmt in _MIGRATION_V8_ALTER_STATEMENTS:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass  # Column may already exist
+
+    # 3. Now create the indexes on the newly-added parts columns
+    for stmt in _MIGRATION_V8_STATEMENTS:
+        if stmt.strip().startswith("CREATE INDEX") and "parts(" in stmt:
+            conn.execute(stmt)
+
+
+def _migrate_v8_to_v9(conn):
+    """Upgrade schema from v8 to v9 — type_style on part_variants.
+
+    Rebuilds part_variants table to add type_style column and change
+    the unique constraint from UNIQUE(part_id, color_finish) to
+    UNIQUE(part_id, type_style, color_finish).
+
+    Also migrates color_options/type_style JSON from parts into
+    variant rows as a cross-product.
+    """
+    import json as _json
+
+    # Temporarily disable foreign keys for the table rebuild
+    conn.execute("PRAGMA foreign_keys = OFF")
+
+    # 1. Rename old table
+    conn.execute("ALTER TABLE part_variants RENAME TO _part_variants_old")
+
+    # 2. Create new table with type_style column and new unique constraint
+    conn.execute("""
+        CREATE TABLE part_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            part_id INTEGER NOT NULL,
+            type_style TEXT NOT NULL DEFAULT '',
+            color_finish TEXT NOT NULL,
+            brand_part_number TEXT DEFAULT '',
+            image_path TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE,
+            UNIQUE(part_id, type_style, color_finish)
+        )
+    """)
+
+    # 3. Copy existing variants with type_style = ''
+    conn.execute("""
+        INSERT INTO part_variants
+            (id, part_id, type_style, color_finish, brand_part_number,
+             image_path, notes, created_at)
+        SELECT id, part_id, '', color_finish, brand_part_number,
+               image_path, notes, created_at
+        FROM _part_variants_old
+    """)
+
+    # 4. Drop old table
+    conn.execute("DROP TABLE _part_variants_old")
+
+    # 5. Recreate index
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_part_variants_part "
+        "ON part_variants(part_id)"
+    )
+
+    # 6. Migrate JSON data from parts.type_style and parts.color_options
+    #    into variant rows for parts that have these JSON arrays populated.
+    rows = conn.execute("""
+        SELECT id, type_style, color_options FROM parts
+        WHERE (type_style != '[]' AND type_style != '')
+           OR (color_options != '[]' AND color_options != '')
+    """).fetchall()
+
+    for row in rows:
+        part_id = row["id"]
+        try:
+            styles = _json.loads(row["type_style"]) if row["type_style"] else []
+        except (_json.JSONDecodeError, TypeError):
+            styles = []
+        try:
+            colors = _json.loads(row["color_options"]) if row["color_options"] else []
+        except (_json.JSONDecodeError, TypeError):
+            colors = []
+
+        if not styles and not colors:
+            continue
+
+        # Check if this part already has variants copied from step 3
+        existing = conn.execute(
+            "SELECT COUNT(*) as cnt FROM part_variants WHERE part_id = ?",
+            (part_id,)
+        ).fetchone()
+
+        if existing["cnt"] > 0:
+            # Part already has variants — if exactly one style, assign it
+            if len(styles) == 1:
+                conn.execute("""
+                    UPDATE part_variants SET type_style = ?
+                    WHERE part_id = ? AND type_style = ''
+                """, (styles[0], part_id))
+        else:
+            # No existing variants — create from cross-product
+            if styles and colors:
+                for style in styles:
+                    for color in colors:
+                        try:
+                            conn.execute("""
+                                INSERT OR IGNORE INTO part_variants
+                                    (part_id, type_style, color_finish)
+                                VALUES (?, ?, ?)
+                            """, (part_id, style, color))
+                        except Exception:
+                            pass
+            elif styles:
+                for style in styles:
+                    try:
+                        conn.execute("""
+                            INSERT OR IGNORE INTO part_variants
+                                (part_id, type_style, color_finish)
+                            VALUES (?, ?, '')
+                        """, (part_id, style))
+                    except Exception:
+                        pass
+            elif colors:
+                for color in colors:
+                    try:
+                        conn.execute("""
+                            INSERT OR IGNORE INTO part_variants
+                                (part_id, type_style, color_finish)
+                            VALUES (?, '', ?)
+                        """, (part_id, color))
+                    except Exception:
+                        pass
+
+    # Re-enable foreign keys
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    # 7. Update schema version
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (9)")
+
+
 def initialize_database(db_connection):
     """Create all tables, indexes, triggers, and seed data.
 
-    On a fresh database, creates the full v6 schema directly.
+    On a fresh database, creates the full v9 schema directly.
     On an existing database, applies migrations incrementally.
     """
     with db_connection.get_connection() as conn:
@@ -1115,3 +1465,12 @@ def initialize_database(db_connection):
                 _migrate_v4_to_v5(conn)
             if version < 6:
                 _migrate_v5_to_v6(conn)
+            if version < 7:
+                _migrate_v6_to_v7(conn)
+            if version < 8:
+                _migrate_v7_to_v8(conn)
+            if version < 9:
+                _migrate_v8_to_v9(conn)
+
+        # Always refresh system hats to latest permissions
+        _refresh_system_hat_permissions(conn)

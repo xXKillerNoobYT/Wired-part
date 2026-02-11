@@ -1,12 +1,13 @@
 """Main application window with tabbed interface."""
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStatusBar,
     QTabWidget,
@@ -28,6 +29,8 @@ from wired_part.utils.constants import (
 
 class MainWindow(QMainWindow):
     """Primary application window."""
+
+    logout_requested = Signal()
 
     def __init__(self, db: DatabaseConnection, current_user: User):
         super().__init__()
@@ -55,7 +58,17 @@ class MainWindow(QMainWindow):
         self._notif_timer.start(60_000)
 
     def _setup_ui(self):
-        """Build the tabbed central layout with grouped sections."""
+        """Build the tabbed central layout with grouped sections.
+
+        Tab layout (7 tabs):
+            0: Dashboard
+            1: Parts Catalog          (standalone)
+            2: Job Tracking           (sub-tabs: Jobs, Trucks, Labor)
+            3: Warehouse & Trucks     (sub-tabs: Warehouse, Trucks Inv, Jobs Inv)
+            4: Orders & Returns       (sub-tabs: Pending, Incoming, Returns, History)
+            5: Agent
+            6: Settings
+        """
         from wired_part.ui.pages.dashboard_page import DashboardPage
         from wired_part.ui.pages.inventory_page import InventoryPage
         from wired_part.ui.pages.parts_catalog_page import PartsCatalogPage
@@ -64,6 +77,10 @@ class MainWindow(QMainWindow):
         from wired_part.ui.pages.trucks_page import TrucksPage
         from wired_part.ui.pages.jobs_page import JobsPage
         from wired_part.ui.pages.labor_page import LaborPage
+        from wired_part.ui.pages.pending_orders_page import PendingOrdersPage
+        from wired_part.ui.pages.incoming_page import IncomingPage
+        from wired_part.ui.pages.returns_page import ReturnsPage
+        from wired_part.ui.pages.order_history_page import OrderHistoryPage
         from wired_part.ui.pages.agent_page import AgentPage
         from wired_part.ui.pages.settings_page import SettingsPage
 
@@ -89,6 +106,14 @@ class MainWindow(QMainWindow):
         mark_read_btn.clicked.connect(self._mark_all_read)
         toolbar.addWidget(mark_read_btn)
 
+        logout_btn = QPushButton("Logout")
+        logout_btn.setMinimumHeight(28)
+        logout_btn.setStyleSheet(
+            "color: #f38ba8; font-weight: bold;"
+        )
+        logout_btn.clicked.connect(self._on_logout)
+        toolbar.addWidget(logout_btn)
+
         central_layout.addLayout(toolbar)
 
         # Notification panel (hidden by default)
@@ -106,33 +131,17 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.tabs)
         self.setCentralWidget(central)
 
-        # ── Tab 1: Dashboard ──────────────────────────────────────
+        # ── Tab 0: Dashboard ─────────────────────────────────────
         self.dashboard_page = DashboardPage(self.repo, self.current_user)
         self.tabs.addTab(self.dashboard_page, "Dashboard")
 
-        # ── Tab 2: Parts & Inventory (sub-tabs) ──────────────────
-        parts_container = QWidget()
-        parts_layout = QVBoxLayout(parts_container)
-        parts_layout.setContentsMargins(0, 0, 0, 0)
-        self.parts_tabs = QTabWidget()
+        # ── Tab 1: Parts Catalog (standalone) ────────────────────
+        self.parts_catalog_page = PartsCatalogPage(
+            self.repo, self.current_user
+        )
+        self.tabs.addTab(self.parts_catalog_page, "Parts Catalog")
 
-        self.parts_catalog_page = PartsCatalogPage(self.repo)
-        self.parts_tabs.addTab(self.parts_catalog_page, "Parts Catalog")
-
-        self.inventory_page = InventoryPage(self.repo)
-        self.parts_tabs.addTab(self.inventory_page, "Warehouse")
-
-        self.trucks_inventory_page = TrucksInventoryPage(self.repo)
-        self.parts_tabs.addTab(self.trucks_inventory_page, "Trucks Inventory")
-
-        self.jobs_inventory_page = JobsInventoryPage(self.repo)
-        self.parts_tabs.addTab(self.jobs_inventory_page, "Jobs Inventory")
-
-        self.parts_tabs.currentChanged.connect(self._on_subtab_changed)
-        parts_layout.addWidget(self.parts_tabs)
-        self.tabs.addTab(parts_container, "Parts & Inventory")
-
-        # ── Tab 3: Job Tracking (sub-tabs) ────────────────────────
+        # ── Tab 2: Job Tracking (sub-tabs) ───────────────────────
         jobs_container = QWidget()
         jobs_layout = QVBoxLayout(jobs_container)
         jobs_layout.setContentsMargins(0, 0, 0, 0)
@@ -151,11 +160,60 @@ class MainWindow(QMainWindow):
         jobs_layout.addWidget(self.jobs_tabs)
         self.tabs.addTab(jobs_container, "Job Tracking")
 
-        # ── Tab 4: Agent ──────────────────────────────────────────
+        # ── Tab 3: Warehouse & Trucks (sub-tabs) ─────────────────
+        warehouse_container = QWidget()
+        warehouse_layout = QVBoxLayout(warehouse_container)
+        warehouse_layout.setContentsMargins(0, 0, 0, 0)
+        self.warehouse_tabs = QTabWidget()
+
+        self.inventory_page = InventoryPage(self.repo)
+        self.warehouse_tabs.addTab(self.inventory_page, "Warehouse")
+
+        self.trucks_inventory_page = TrucksInventoryPage(self.repo)
+        self.warehouse_tabs.addTab(
+            self.trucks_inventory_page, "Trucks Inventory"
+        )
+
+        self.jobs_inventory_page = JobsInventoryPage(self.repo)
+        self.warehouse_tabs.addTab(
+            self.jobs_inventory_page, "Jobs Inventory"
+        )
+
+        self.warehouse_tabs.currentChanged.connect(self._on_subtab_changed)
+        warehouse_layout.addWidget(self.warehouse_tabs)
+        self.tabs.addTab(warehouse_container, "Warehouse & Trucks")
+
+        # ── Tab 4: Orders & Returns (sub-tabs) ───────────────────
+        orders_container = QWidget()
+        orders_layout = QVBoxLayout(orders_container)
+        orders_layout.setContentsMargins(0, 0, 0, 0)
+        self.orders_tabs = QTabWidget()
+
+        self.pending_orders_page = PendingOrdersPage(
+            self.repo, self.current_user
+        )
+        self.orders_tabs.addTab(self.pending_orders_page, "Pending Orders")
+
+        self.incoming_page = IncomingPage(self.repo, self.current_user)
+        self.orders_tabs.addTab(self.incoming_page, "Incoming / Receive")
+
+        self.returns_page = ReturnsPage(self.repo, self.current_user)
+        self.orders_tabs.addTab(self.returns_page, "Returns & Pickups")
+
+        self.order_history_page = OrderHistoryPage(
+            self.repo, self.current_user
+        )
+        self.orders_tabs.addTab(self.order_history_page, "Order History")
+
+        self.orders_tabs.currentChanged.connect(self._on_subtab_changed)
+        orders_layout.addWidget(self.orders_tabs)
+        self.tabs.addTab(orders_container, "Orders & Returns")
+
+        # ── Tab 5: Agent ─────────────────────────────────────────
         self.agent_page = AgentPage(self.repo)
         self.tabs.addTab(self.agent_page, "Agent")
 
-        # ── Tab 5: Settings ───────────────────────────────────────
+        # ── Tab 6: Settings ──────────────────────────────────────
         self.settings_page = SettingsPage(self.repo, self.current_user)
         self.tabs.addTab(self.settings_page, "Settings")
 
@@ -169,18 +227,18 @@ class MainWindow(QMainWindow):
         """Hide/show tabs based on the current user's hat permissions."""
         perms = self.repo.get_user_permissions(self.current_user.id)
 
-        # Parts & Inventory sub-tabs
+        # Parts Catalog sub-tabs (Tab 1)
+        parts_sub = self.parts_catalog_page.sub_tabs
         perm_map_parts = {
-            0: "tab_parts_catalog",     # Parts Catalog
-            1: "tab_warehouse",         # Warehouse
-            2: "tab_trucks_inventory",  # Trucks Inventory
-            3: "tab_jobs_inventory",    # Jobs Inventory
+            0: "tab_parts_catalog",  # Catalog
+            1: "parts_brands",       # Brand Management
+            2: "parts_qr_tags",      # Tag Maker
         }
         for idx, perm in perm_map_parts.items():
-            if idx < self.parts_tabs.count():
-                self.parts_tabs.setTabVisible(idx, perm in perms)
+            if idx < parts_sub.count():
+                parts_sub.setTabVisible(idx, perm in perms)
 
-        # Job Tracking sub-tabs
+        # Job Tracking sub-tabs (Tab 2)
         perm_map_jobs = {
             0: "tab_job_tracking",  # Jobs
             1: "tab_trucks",       # Trucks
@@ -190,25 +248,53 @@ class MainWindow(QMainWindow):
             if idx < self.jobs_tabs.count():
                 self.jobs_tabs.setTabVisible(idx, perm in perms)
 
+        # Warehouse & Trucks sub-tabs (Tab 3)
+        perm_map_warehouse = {
+            0: "tab_warehouse",         # Warehouse
+            1: "tab_trucks_inventory",  # Trucks Inventory
+            2: "tab_jobs_inventory",    # Jobs Inventory
+        }
+        for idx, perm in perm_map_warehouse.items():
+            if idx < self.warehouse_tabs.count():
+                self.warehouse_tabs.setTabVisible(idx, perm in perms)
+
+        # Orders & Returns sub-tabs (Tab 4)
+        perm_map_orders = {
+            0: "orders_create",    # Pending Orders (create/manage)
+            1: "orders_receive",   # Incoming / Receive
+            2: "orders_return",    # Returns & Pickups
+            3: "orders_history",   # Order History
+        }
+        for idx, perm in perm_map_orders.items():
+            if idx < self.orders_tabs.count():
+                self.orders_tabs.setTabVisible(idx, perm in perms)
+
         # Main tabs visibility
         # Tab 0 = Dashboard (always visible)
-        # Tab 1 = Parts & Inventory
-        has_any_parts = any(
-            p in perms for p in perm_map_parts.values()
-        )
-        self.tabs.setTabVisible(1, has_any_parts)
+        # Tab 1 = Parts Catalog
+        self.tabs.setTabVisible(1, "tab_parts_catalog" in perms)
 
         # Tab 2 = Job Tracking
-        has_any_jobs = any(
-            p in perms for p in perm_map_jobs.values()
-        )
+        has_any_jobs = any(p in perms for p in perm_map_jobs.values())
         self.tabs.setTabVisible(2, has_any_jobs)
 
-        # Tab 3 = Agent
-        self.tabs.setTabVisible(3, "tab_agent" in perms)
+        # Tab 3 = Warehouse & Trucks
+        has_any_warehouse = any(
+            p in perms for p in perm_map_warehouse.values()
+        )
+        self.tabs.setTabVisible(3, has_any_warehouse)
 
-        # Tab 4 = Settings
-        self.tabs.setTabVisible(4, "tab_settings" in perms)
+        # Tab 4 = Orders & Returns
+        self.tabs.setTabVisible(4, "tab_orders" in perms)
+
+        # Tab 5 = Agent
+        self.tabs.setTabVisible(5, "tab_agent" in perms)
+
+        # Tab 6 = Settings
+        self.tabs.setTabVisible(6, "tab_settings" in perms)
+
+        # Update incomplete badge on Parts Catalog tab
+        self._update_tab_badges()
 
     def _setup_background_agents(self):
         """Initialize the background agent manager."""
@@ -266,18 +352,33 @@ class MainWindow(QMainWindow):
             self.notif_btn.setText("Notifications (0)")
             self.notif_btn.setStyleSheet("")
 
+    def _update_tab_badges(self):
+        """Update tab text with badge counts (e.g. incomplete parts)."""
+        try:
+            count = self.repo.get_incomplete_parts_count()
+            if count > 0:
+                self.tabs.setTabText(1, f"Parts Catalog ({count})")
+            else:
+                self.tabs.setTabText(1, "Parts Catalog")
+        except Exception:
+            pass
+
     def _on_tab_changed(self, index: int):
         """Refresh the active tab's data."""
         widget = self.tabs.widget(index)
         if hasattr(widget, "refresh"):
             widget.refresh()
         # For container tabs with sub-tabs, refresh the active sub-tab
-        for sub_tabs in (self.parts_tabs, self.jobs_tabs):
+        for sub_tabs in (
+            self.parts_catalog_page.sub_tabs,
+            self.jobs_tabs, self.warehouse_tabs, self.orders_tabs,
+        ):
             if sub_tabs.parent() == widget:
                 sub_widget = sub_tabs.currentWidget()
                 if hasattr(sub_widget, "refresh"):
                     sub_widget.refresh()
         self._update_status_bar()
+        self._update_tab_badges()
 
     def _on_subtab_changed(self, index: int):
         """Refresh the active sub-tab's data."""
@@ -318,3 +419,16 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
         if self.notif_panel.isVisible():
             self._refresh_notifications()
+
+    def _on_logout(self):
+        """Confirm and trigger logout."""
+        reply = QMessageBox.question(
+            self, "Logout",
+            f"Logout as {self.current_user.display_name}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._notif_timer.stop()
+            self.logout_requested.emit()
+            self.close()

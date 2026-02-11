@@ -5,6 +5,7 @@ from typing import Optional
 
 from .connection import DatabaseConnection
 from .models import (
+    Brand,
     Category,
     ConsumptionLog,
     Hat,
@@ -20,6 +21,8 @@ from .models import (
     Part,
     PartsList,
     PartsListItem,
+    PartSupplier,
+    PartVariant,
     PurchaseOrder,
     PurchaseOrderItem,
     ReceiveLogEntry,
@@ -105,31 +108,32 @@ class Repository:
 
     # ── Parts ───────────────────────────────────────────────────
 
+    _PARTS_SELECT = """
+        SELECT p.*,
+               COALESCE(c.name, '') AS category_name,
+               COALESCE(b.name, '') AS brand_name
+        FROM parts p
+        LEFT JOIN categories c ON p.category_id = c.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+    """
+
     def get_all_parts(self) -> list[Part]:
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
-            ORDER BY p.part_number
-        """)
+        rows = self.db.execute(
+            self._PARTS_SELECT + " ORDER BY p.part_number"
+        )
         return [Part(**dict(r)) for r in rows]
 
     def get_part_by_id(self, part_id: int) -> Optional[Part]:
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
-            WHERE p.id = ?
-        """, (part_id,))
+        rows = self.db.execute(
+            self._PARTS_SELECT + " WHERE p.id = ?", (part_id,)
+        )
         return Part(**dict(rows[0])) if rows else None
 
     def get_part_by_number(self, part_number: str) -> Optional[Part]:
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
-            WHERE p.part_number = ?
-        """, (part_number,))
+        rows = self.db.execute(
+            self._PARTS_SELECT + " WHERE p.part_number = ?",
+            (part_number,),
+        )
         return Part(**dict(rows[0])) if rows else None
 
     def search_parts(self, query: str) -> list[Part]:
@@ -137,50 +141,121 @@ class Repository:
         if not query.strip():
             return self.get_all_parts()
         pattern = f"%{query.strip()}%"
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
             WHERE p.part_number LIKE ?
                OR p.description LIKE ?
+               OR p.name LIKE ?
                OR p.location LIKE ?
                OR p.supplier LIKE ?
                OR p.notes LIKE ?
-            ORDER BY p.part_number
-        """, (pattern, pattern, pattern, pattern, pattern))
+               OR p.brand_part_number LIKE ?
+               OR p.local_part_number LIKE ?
+               OR p.subcategory LIKE ?
+               OR COALESCE(b.name, '') LIKE ?
+            ORDER BY p.name, p.part_number
+        """, (pattern,) * 10)
         return [Part(**dict(r)) for r in rows]
 
     def get_parts_by_category(self, category_id: int) -> list[Part]:
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
             WHERE p.category_id = ?
             ORDER BY p.part_number
         """, (category_id,))
         return [Part(**dict(r)) for r in rows]
 
     def get_low_stock_parts(self) -> list[Part]:
-        rows = self.db.execute("""
-            SELECT p.*, COALESCE(c.name, '') AS category_name
-            FROM parts p
-            LEFT JOIN categories c ON p.category_id = c.id
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
             WHERE p.quantity < p.min_quantity AND p.min_quantity > 0
             ORDER BY (p.min_quantity - p.quantity) DESC
         """)
         return [Part(**dict(r)) for r in rows]
+
+    def get_parts_by_type(self, part_type: str) -> list[Part]:
+        """Get all parts of a specific type ('general' or 'specific')."""
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
+            WHERE p.part_type = ?
+            ORDER BY p.part_number
+        """, (part_type,))
+        return [Part(**dict(r)) for r in rows]
+
+    def get_parts_by_brand(self, brand_id: int) -> list[Part]:
+        """Get all parts linked to a specific brand."""
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
+            WHERE p.brand_id = ?
+            ORDER BY p.part_number
+        """, (brand_id,))
+        return [Part(**dict(r)) for r in rows]
+
+    def get_parts_needing_qr_tags(self) -> list[Part]:
+        """Get all parts that don't have a QR tag printed."""
+        rows = self.db.execute(
+            self._PARTS_SELECT + """
+            WHERE p.has_qr_tag = 0
+            ORDER BY p.part_number
+        """)
+        return [Part(**dict(r)) for r in rows]
+
+    def get_incomplete_parts_count(self) -> int:
+        """Count parts with incomplete required data (type-aware)."""
+        rows = self.db.execute("""
+            SELECT COUNT(*) as cnt FROM parts
+            WHERE name = '' OR name IS NULL
+               OR unit_cost <= 0
+               OR category_id IS NULL
+               OR (part_type = 'specific' AND (
+                   (part_number = '' OR part_number IS NULL)
+                   OR brand_id IS NULL
+                   OR brand_part_number = ''
+                   OR brand_part_number IS NULL
+               ))
+        """)
+        return rows[0]["cnt"] if rows else 0
+
+    def generate_local_part_number(self) -> str:
+        """Generate the next local part number (e.g. LP-0001)."""
+        from wired_part.config import Config
+        prefix = Config.LOCAL_PN_PREFIX
+        rows = self.db.execute("""
+            SELECT local_part_number FROM parts
+            WHERE local_part_number LIKE ?
+            ORDER BY local_part_number DESC LIMIT 1
+        """, (f"{prefix}-%",))
+        if rows and rows[0]["local_part_number"]:
+            last = rows[0]["local_part_number"]
+            try:
+                num = int(last.split("-", 1)[1]) + 1
+            except (ValueError, IndexError):
+                num = 1
+        else:
+            num = 1
+        return f"{prefix}-{num:04d}"
 
     def create_part(self, part: Part) -> int:
         with self.db.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO parts
                     (part_number, description, quantity, location,
-                     category_id, unit_cost, min_quantity, supplier, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     category_id, unit_cost, min_quantity, max_quantity,
+                     supplier, notes, name,
+                     part_type, brand_id, brand_part_number,
+                     local_part_number, image_path, subcategory,
+                     color_options, type_style, has_qr_tag, pdfs)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 part.part_number, part.description, part.quantity,
                 part.location, part.category_id, part.unit_cost,
-                part.min_quantity, part.supplier, part.notes,
+                part.min_quantity, part.max_quantity,
+                part.supplier, part.notes, part.name,
+                part.part_type, part.brand_id, part.brand_part_number,
+                part.local_part_number, part.image_path, part.subcategory,
+                part.color_options, part.type_style, part.has_qr_tag,
+                part.pdfs,
             ))
             return cursor.lastrowid
 
@@ -190,18 +265,153 @@ class Repository:
                 UPDATE parts SET
                     part_number = ?, description = ?, quantity = ?,
                     location = ?, category_id = ?, unit_cost = ?,
-                    min_quantity = ?, supplier = ?, notes = ?
+                    min_quantity = ?, max_quantity = ?,
+                    supplier = ?, notes = ?, name = ?,
+                    part_type = ?, brand_id = ?, brand_part_number = ?,
+                    local_part_number = ?, image_path = ?, subcategory = ?,
+                    color_options = ?, type_style = ?, has_qr_tag = ?,
+                    pdfs = ?
                 WHERE id = ?
             """, (
                 part.part_number, part.description, part.quantity,
                 part.location, part.category_id, part.unit_cost,
-                part.min_quantity, part.supplier, part.notes,
-                part.id,
+                part.min_quantity, part.max_quantity,
+                part.supplier, part.notes, part.name,
+                part.part_type, part.brand_id, part.brand_part_number,
+                part.local_part_number, part.image_path, part.subcategory,
+                part.color_options, part.type_style, part.has_qr_tag,
+                part.pdfs, part.id,
             ))
 
     def delete_part(self, part_id: int):
         with self.db.get_connection() as conn:
             conn.execute("DELETE FROM parts WHERE id = ?", (part_id,))
+
+    # ── Brands ────────────────────────────────────────────────────
+
+    def create_brand(self, brand: Brand) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO brands (name, website, notes)
+                VALUES (?, ?, ?)
+            """, (brand.name, brand.website, brand.notes))
+            return cursor.lastrowid
+
+    def get_all_brands(self) -> list[Brand]:
+        rows = self.db.execute(
+            "SELECT * FROM brands ORDER BY name"
+        )
+        return [Brand(**dict(r)) for r in rows]
+
+    def get_brand_by_id(self, brand_id: int) -> Optional[Brand]:
+        rows = self.db.execute(
+            "SELECT * FROM brands WHERE id = ?", (brand_id,)
+        )
+        return Brand(**dict(rows[0])) if rows else None
+
+    def get_brand_by_name(self, name: str) -> Optional[Brand]:
+        rows = self.db.execute(
+            "SELECT * FROM brands WHERE name = ?", (name,)
+        )
+        return Brand(**dict(rows[0])) if rows else None
+
+    def update_brand(self, brand: Brand):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE brands SET name = ?, website = ?, notes = ?
+                WHERE id = ?
+            """, (brand.name, brand.website, brand.notes, brand.id))
+
+    def delete_brand(self, brand_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute("DELETE FROM brands WHERE id = ?", (brand_id,))
+
+    # ── Part-Supplier links ──────────────────────────────────────
+
+    def link_part_supplier(self, ps: PartSupplier) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO part_suppliers
+                    (part_id, supplier_id, supplier_part_number, notes)
+                VALUES (?, ?, ?, ?)
+            """, (ps.part_id, ps.supplier_id,
+                  ps.supplier_part_number, ps.notes))
+            return cursor.lastrowid
+
+    def unlink_part_supplier(self, part_id: int, supplier_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                DELETE FROM part_suppliers
+                WHERE part_id = ? AND supplier_id = ?
+            """, (part_id, supplier_id))
+
+    def get_part_suppliers(self, part_id: int) -> list[PartSupplier]:
+        """Get all suppliers linked to a part."""
+        rows = self.db.execute("""
+            SELECT ps.*, COALESCE(s.name, '') AS supplier_name
+            FROM part_suppliers ps
+            LEFT JOIN suppliers s ON ps.supplier_id = s.id
+            WHERE ps.part_id = ?
+            ORDER BY s.name
+        """, (part_id,))
+        return [PartSupplier(**dict(r)) for r in rows]
+
+    def get_supplier_parts(self, supplier_id: int) -> list[PartSupplier]:
+        """Get all parts linked to a supplier."""
+        rows = self.db.execute("""
+            SELECT ps.*, COALESCE(s.name, '') AS supplier_name
+            FROM part_suppliers ps
+            LEFT JOIN suppliers s ON ps.supplier_id = s.id
+            WHERE ps.supplier_id = ?
+            ORDER BY ps.part_id
+        """, (supplier_id,))
+        return [PartSupplier(**dict(r)) for r in rows]
+
+    # ── Part Variants ────────────────────────────────────────────
+
+    def create_part_variant(self, variant: PartVariant) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO part_variants
+                    (part_id, type_style, color_finish,
+                     brand_part_number, image_path, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (variant.part_id, variant.type_style,
+                  variant.color_finish, variant.brand_part_number,
+                  variant.image_path, variant.notes))
+            return cursor.lastrowid
+
+    def get_part_variants(self, part_id: int) -> list[PartVariant]:
+        rows = self.db.execute("""
+            SELECT * FROM part_variants
+            WHERE part_id = ?
+            ORDER BY type_style, color_finish
+        """, (part_id,))
+        return [PartVariant(**dict(r)) for r in rows]
+
+    def get_part_variant_by_id(self, variant_id: int) -> Optional[PartVariant]:
+        rows = self.db.execute(
+            "SELECT * FROM part_variants WHERE id = ?", (variant_id,)
+        )
+        return PartVariant(**dict(rows[0])) if rows else None
+
+    def update_part_variant(self, variant: PartVariant):
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE part_variants SET
+                    type_style = ?, color_finish = ?,
+                    brand_part_number = ?,
+                    image_path = ?, notes = ?
+                WHERE id = ?
+            """, (variant.type_style, variant.color_finish,
+                  variant.brand_part_number,
+                  variant.image_path, variant.notes, variant.id))
+
+    def delete_part_variant(self, variant_id: int):
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM part_variants WHERE id = ?", (variant_id,)
+            )
 
     # ── Users ────────────────────────────────────────────────────
 
@@ -985,12 +1195,14 @@ class Repository:
             cursor = conn.execute("""
                 INSERT INTO suppliers
                     (name, contact_name, email, phone, address,
-                     notes, preference_score, delivery_schedule, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     notes, preference_score, delivery_schedule,
+                     is_supply_house, operating_hours, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 supplier.name, supplier.contact_name, supplier.email,
                 supplier.phone, supplier.address, supplier.notes,
                 supplier.preference_score, supplier.delivery_schedule,
+                supplier.is_supply_house, supplier.operating_hours,
                 supplier.is_active,
             ))
             return cursor.lastrowid
@@ -1019,12 +1231,14 @@ class Repository:
                 UPDATE suppliers SET
                     name = ?, contact_name = ?, email = ?, phone = ?,
                     address = ?, notes = ?, preference_score = ?,
-                    delivery_schedule = ?, is_active = ?
+                    delivery_schedule = ?, is_supply_house = ?,
+                    operating_hours = ?, is_active = ?
                 WHERE id = ?
             """, (
                 supplier.name, supplier.contact_name, supplier.email,
                 supplier.phone, supplier.address, supplier.notes,
                 supplier.preference_score, supplier.delivery_schedule,
+                supplier.is_supply_house, supplier.operating_hours,
                 supplier.is_active, supplier.id,
             ))
 
@@ -1956,14 +2170,16 @@ class Repository:
     def generate_order_number(self) -> str:
         """Generate next sequential PO number like PO-2026-001."""
         from datetime import datetime
+        from wired_part.config import Config
+        prefix = Config.ORDER_NUMBER_PREFIX
         year = datetime.now().year
         rows = self.db.execute(
             "SELECT COUNT(*) as cnt FROM purchase_orders "
             "WHERE order_number LIKE ?",
-            (f"PO-{year}-%",),
+            (f"{prefix}-{year}-%",),
         )
         count = rows[0]["cnt"] + 1 if rows else 1
-        return f"PO-{year}-{count:03d}"
+        return f"{prefix}-{year}-{count:03d}"
 
     def create_purchase_order(self, order: PurchaseOrder) -> int:
         """Create a new purchase order (draft status)."""
@@ -2335,11 +2551,20 @@ class Repository:
             )
 
             if all_received:
-                conn.execute(
-                    "UPDATE purchase_orders SET status = 'received' "
-                    "WHERE id = ?",
-                    (order_id,),
-                )
+                from wired_part.config import Config
+                if Config.AUTO_CLOSE_RECEIVED_ORDERS:
+                    from datetime import datetime as _dt
+                    conn.execute(
+                        "UPDATE purchase_orders SET status = 'closed', "
+                        "closed_at = ? WHERE id = ?",
+                        (_dt.now().isoformat(), order_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE purchase_orders SET status = 'received' "
+                        "WHERE id = ?",
+                        (order_id,),
+                    )
             elif any_received:
                 conn.execute(
                     "UPDATE purchase_orders SET status = 'partial' "
@@ -2482,14 +2707,16 @@ class Repository:
     def generate_ra_number(self) -> str:
         """Generate next sequential RA number like RA-2026-001."""
         from datetime import datetime
+        from wired_part.config import Config
+        prefix = Config.RA_NUMBER_PREFIX
         year = datetime.now().year
         rows = self.db.execute(
             "SELECT COUNT(*) as cnt FROM return_authorizations "
             "WHERE ra_number LIKE ?",
-            (f"RA-{year}-%",),
+            (f"{prefix}-{year}-%",),
         )
         count = rows[0]["cnt"] + 1 if rows else 1
-        return f"RA-{year}-{count:03d}"
+        return f"{prefix}-{year}-{count:03d}"
 
     def create_return_authorization(
         self, ra: ReturnAuthorization, items: list[ReturnAuthorizationItem]
@@ -2810,3 +3037,61 @@ class Repository:
             "items_awaiting": awaiting[0]["cnt"] if awaiting else 0,
             "open_returns": open_returns[0]["cnt"] if open_returns else 0,
         }
+
+    # ── Shortfall Detection ──────────────────────────────────────
+
+    def check_shortfall(self, list_id: int) -> list[dict]:
+        """Check warehouse stock shortfalls for a parts list.
+
+        Compares each item's required quantity against current warehouse
+        stock. Returns a list of dicts for items where stock is
+        insufficient:
+            {part_id, part_number, description, required, in_stock,
+             shortfall, unit_cost}
+        """
+        items = self.get_parts_list_items(list_id)
+        shortfalls = []
+
+        for item in items:
+            part = self.get_part_by_id(item.part_id)
+            if not part:
+                continue
+
+            if part.quantity < item.quantity:
+                shortfalls.append({
+                    "part_id": part.id,
+                    "part_number": part.part_number,
+                    "description": part.description,
+                    "required": item.quantity,
+                    "in_stock": part.quantity,
+                    "shortfall": item.quantity - part.quantity,
+                    "unit_cost": part.unit_cost,
+                })
+
+        return shortfalls
+
+    def check_shortfall_for_job(self, job_id: int) -> list[dict]:
+        """Check warehouse stock shortfalls for all parts lists linked
+        to a specific job.
+
+        Returns combined shortfalls across all job-specific lists.
+        """
+        lists = self.get_all_parts_lists(list_type="specific")
+        job_lists = [pl for pl in lists if pl.job_id == job_id]
+
+        all_shortfalls = {}
+        for pl in job_lists:
+            shortfalls = self.check_shortfall(pl.id)
+            for sf in shortfalls:
+                key = sf["part_id"]
+                if key in all_shortfalls:
+                    all_shortfalls[key]["required"] += sf["required"]
+                    all_shortfalls[key]["shortfall"] = max(
+                        0,
+                        all_shortfalls[key]["required"]
+                        - all_shortfalls[key]["in_stock"],
+                    )
+                else:
+                    all_shortfalls[key] = dict(sf)
+
+        return list(all_shortfalls.values())

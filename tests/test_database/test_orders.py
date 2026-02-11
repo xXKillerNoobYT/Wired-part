@@ -380,7 +380,9 @@ class TestOrderReceiving:
         repo.receive_order_items(draft_order.id, receipts, test_user.id)
 
         order = repo.get_purchase_order_by_id(draft_order.id)
-        assert order.status == "received"
+        # With AUTO_CLOSE_RECEIVED_ORDERS=True (default), fully received
+        # orders are auto-closed
+        assert order.status == "closed"
 
     def test_receive_creates_log(self, repo, draft_order, parts, test_user):
         repo.submit_purchase_order(draft_order.id)
