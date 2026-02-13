@@ -2,6 +2,7 @@
 
 import json
 import os
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -134,6 +135,15 @@ class Config:
         "notebook_sections_template",
         None,  # None = use DEFAULT_NOTEBOOK_SECTIONS from constants
     )
+
+    # Sync settings
+    SYNC_ENABLED: bool = _runtime.get("sync_enabled", False)
+    SYNC_FOLDER_PATH: str = _runtime.get("sync_folder_path", "")
+    SYNC_INTERVAL_MINUTES: int = int(_runtime.get(
+        "sync_interval_minutes", "60"
+    ))
+    DEVICE_ID: str = _runtime.get("device_id", "")
+    LAST_SYNC_TIMESTAMP: str = _runtime.get("last_sync_timestamp", "")
 
     # UI
     APP_THEME: str = _runtime.get(
@@ -281,3 +291,42 @@ class Config:
             return list(cls.NOTEBOOK_SECTIONS_TEMPLATE)
         from wired_part.utils.constants import DEFAULT_NOTEBOOK_SECTIONS
         return list(DEFAULT_NOTEBOOK_SECTIONS)
+
+    @classmethod
+    def get_device_id(cls) -> str:
+        """Get or generate a unique device ID (UUID).
+
+        The device ID is generated once on first call and persisted
+        to settings.json so it survives across sessions.
+        """
+        if cls.DEVICE_ID:
+            return cls.DEVICE_ID
+        new_id = str(uuid.uuid4())
+        cls.DEVICE_ID = new_id
+        settings = _load_settings()
+        settings["device_id"] = new_id
+        _save_settings(settings)
+        return new_id
+
+    @classmethod
+    def update_sync_settings(cls, enabled: bool, folder_path: str,
+                             interval_minutes: int):
+        """Update sync settings and persist."""
+        cls.SYNC_ENABLED = enabled
+        cls.SYNC_FOLDER_PATH = folder_path
+        cls.SYNC_INTERVAL_MINUTES = interval_minutes
+
+        settings = _load_settings()
+        settings["sync_enabled"] = enabled
+        settings["sync_folder_path"] = folder_path
+        settings["sync_interval_minutes"] = interval_minutes
+        _save_settings(settings)
+
+    @classmethod
+    def update_last_sync(cls, timestamp: str):
+        """Update the last sync timestamp and persist."""
+        cls.LAST_SYNC_TIMESTAMP = timestamp
+
+        settings = _load_settings()
+        settings["last_sync_timestamp"] = timestamp
+        _save_settings(settings)
