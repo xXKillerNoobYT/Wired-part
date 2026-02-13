@@ -1,7 +1,11 @@
 """Three-panel notebook widget: sections list | pages list | page editor."""
 
+import os
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -15,7 +19,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wired_part.database.models import NotebookPage, NotebookSection
+from wired_part.database.models import (
+    NotebookAttachment,
+    NotebookPage,
+    NotebookSection,
+)
 from wired_part.database.repository import Repository
 from wired_part.ui.widgets.rich_text_editor import RichTextEditor
 from wired_part.utils.constants import LOCKED_NOTEBOOK_SECTIONS
@@ -131,7 +139,45 @@ class NotebookWidget(QWidget):
         self.editor = RichTextEditor()
         self.editor.set_read_only(True)
         self.editor.content_changed.connect(self._auto_save)
+        self.editor.image_inserted.connect(self._on_image_inserted)
         editor_layout.addWidget(self.editor, 1)
+
+        # ── Attachments bar ──────────────────────────────────────
+        att_row = QHBoxLayout()
+        att_row.setSpacing(4)
+        att_label = QLabel("Attachments:")
+        att_label.setStyleSheet("font-size: 11px; color: #a6adc8;")
+        att_row.addWidget(att_label)
+
+        self.attachments_list = QListWidget()
+        self.attachments_list.setMaximumHeight(80)
+        self.attachments_list.setToolTip(
+            "Files attached to this page.\n"
+            "Double-click to open with your default app."
+        )
+        self.attachments_list.itemDoubleClicked.connect(
+            self._on_open_attachment
+        )
+        att_row.addWidget(self.attachments_list, 1)
+
+        att_btns = QVBoxLayout()
+        att_btns.setSpacing(2)
+        self.add_att_btn = QPushButton("+")
+        self.add_att_btn.setFixedSize(28, 28)
+        self.add_att_btn.setToolTip("Attach a file to this page")
+        self.add_att_btn.setEnabled(False)
+        self.add_att_btn.clicked.connect(self._on_add_attachment)
+        att_btns.addWidget(self.add_att_btn)
+
+        self.del_att_btn = QPushButton("x")
+        self.del_att_btn.setFixedSize(28, 28)
+        self.del_att_btn.setToolTip("Remove selected attachment")
+        self.del_att_btn.setEnabled(False)
+        self.del_att_btn.clicked.connect(self._on_delete_attachment)
+        att_btns.addWidget(self.del_att_btn)
+        att_row.addLayout(att_btns)
+
+        editor_layout.addLayout(att_row)
 
         # Status label
         self.status_label = QLabel("Select a page to edit")
@@ -241,6 +287,9 @@ class NotebookWidget(QWidget):
         self.page_title_input.setText(page.title or "")
         self.editor.set_read_only(False)
         self.editor.set_html(page.content or "")
+        self.add_att_btn.setEnabled(True)
+        self.del_att_btn.setEnabled(True)
+        self._load_attachments()
         self.status_label.setText(
             f"Last updated: {page.updated_at or 'never'}"
         )
@@ -252,6 +301,9 @@ class NotebookWidget(QWidget):
         self.page_title_input.setText("")
         self.editor.set_read_only(True)
         self.editor.clear()
+        self.attachments_list.clear()
+        self.add_att_btn.setEnabled(False)
+        self.del_att_btn.setEnabled(False)
         self.status_label.setText("Select a page to edit")
 
     def _auto_save(self):
@@ -291,6 +343,79 @@ class NotebookWidget(QWidget):
         current_item = self.pages_list.currentItem()
         if current_item:
             current_item.setText(page.title)
+
+    # ── Attachment helpers ──────────────────────────────────────
+
+    def _load_attachments(self):
+        """Load attachments for the current page into the list."""
+        self.attachments_list.clear()
+        if not self._current_page_id:
+            return
+        attachments = self.repo.get_attachments(self._current_page_id)
+        for att in attachments:
+            size_kb = att.file_size / 1024
+            label = f"{att.filename}  ({size_kb:.0f} KB)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, att.id)
+            item.setData(Qt.UserRole + 1, att.file_path)
+            self.attachments_list.addItem(item)
+
+    def _on_add_attachment(self):
+        """Attach a file to the current page."""
+        if not self._current_page_id:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach File", "",
+            "All Files (*.*)"
+        )
+        if not path:
+            return
+        self._create_attachment_from_path(path)
+
+    def _on_image_inserted(self, path: str):
+        """Auto-attach an image that was embedded via the toolbar."""
+        if not self._current_page_id:
+            return
+        self._create_attachment_from_path(path)
+
+    def _create_attachment_from_path(self, path: str):
+        """Create an attachment record for a file path."""
+        p = Path(path)
+        if not p.exists():
+            return
+        att = NotebookAttachment(
+            page_id=self._current_page_id,
+            filename=p.name,
+            file_path=str(p),
+            file_type=p.suffix.lstrip(".").lower(),
+            file_size=p.stat().st_size,
+            created_by=self.user_id,
+        )
+        self.repo.create_attachment(att)
+        self._load_attachments()
+
+    def _on_delete_attachment(self):
+        """Delete the selected attachment."""
+        current = self.attachments_list.currentItem()
+        if not current:
+            return
+        att_id = current.data(Qt.UserRole)
+        reply = QMessageBox.question(
+            self, "Remove Attachment",
+            f"Remove '{current.text().split('  (')[0]}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.repo.delete_attachment(att_id)
+            self._load_attachments()
+
+    def _on_open_attachment(self, item):
+        """Open the attachment file with the system default application."""
+        file_path = item.data(Qt.UserRole + 1)
+        if file_path and Path(file_path).exists():
+            os.startfile(file_path) if hasattr(os, "startfile") else \
+                os.system(f'open "{file_path}"')  # noqa: S605
 
     def _on_add_section(self):
         """Add a new section to this notebook."""

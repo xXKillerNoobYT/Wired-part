@@ -51,6 +51,7 @@ SYNC_TABLES = [
     "return_items",
     "notebook_sections",
     "notebook_pages",
+    "notebook_attachments",
     "job_updates",
     "activity_log",
     "notifications",

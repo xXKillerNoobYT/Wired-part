@@ -1,10 +1,23 @@
 """Rich text editor widget with formatting toolbar — for notebook pages."""
 
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextListFormat
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal, QTimer, QUrl
+from PySide6.QtGui import (
+    QFont,
+    QImage,
+    QTextCharFormat,
+    QTextCursor,
+    QTextImageFormat,
+    QTextListFormat,
+)
 from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -12,10 +25,56 @@ from PySide6.QtWidgets import (
 )
 
 
+class _InsertLinkDialog(QDialog):
+    """Small dialog to collect URL and display text for a hyperlink."""
+
+    def __init__(self, selected_text: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Insert Link")
+        self.setMinimumSize(380, 160)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://example.com")
+        self.url_input.setMinimumHeight(28)
+        form.addRow("URL:", self.url_input)
+
+        self.text_input = QLineEdit()
+        self.text_input.setPlaceholderText("Link text (optional)")
+        self.text_input.setMinimumHeight(28)
+        self.text_input.setText(selected_text)
+        form.addRow("Text:", self.text_input)
+
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("Insert")
+        ok_btn.setMinimumHeight(30)
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(30)
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+    @property
+    def url(self) -> str:
+        return self.url_input.text().strip()
+
+    @property
+    def display_text(self) -> str:
+        return self.text_input.text().strip() or self.url
+
+
 class RichTextEditor(QWidget):
     """QTextEdit with formatting toolbar and auto-save debounce."""
 
     content_changed = Signal()  # Emitted after debounce period
+    image_inserted = Signal(str)  # Emitted with file path when image inserted
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,6 +157,24 @@ class RichTextEditor(QWidget):
         self.heading_btn.clicked.connect(self._toggle_heading)
         toolbar.addWidget(self.heading_btn)
 
+        sep3 = QLabel("|")
+        sep3.setStyleSheet("color: #45475a; padding: 0 4px;")
+        toolbar.addWidget(sep3)
+
+        self.link_btn = QPushButton("Link")
+        self.link_btn.setFixedWidth(44)
+        self.link_btn.setStyleSheet(_BTN_STYLE)
+        self.link_btn.setToolTip("Insert Hyperlink")
+        self.link_btn.clicked.connect(self._insert_link)
+        toolbar.addWidget(self.link_btn)
+
+        self.image_btn = QPushButton("Img")
+        self.image_btn.setFixedWidth(38)
+        self.image_btn.setStyleSheet(_BTN_STYLE)
+        self.image_btn.setToolTip("Insert Image")
+        self.image_btn.clicked.connect(self._insert_image)
+        toolbar.addWidget(self.image_btn)
+
         toolbar.addStretch()
 
         layout.addLayout(toolbar)
@@ -174,6 +251,61 @@ class RichTextEditor(QWidget):
             cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
             cursor.mergeCharFormat(fmt)
 
+    def _insert_link(self):
+        """Show dialog and insert a hyperlink at the cursor position."""
+        cursor = self.editor.textCursor()
+        selected = cursor.selectedText()
+
+        dlg = _InsertLinkDialog(selected, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if not dlg.url:
+            return
+
+        url = dlg.url
+        text = dlg.display_text
+
+        # Insert as HTML anchor
+        html = f'<a href="{url}">{text}</a>'
+        cursor.insertHtml(html)
+
+    def _insert_image(self):
+        """Open file dialog and embed an image into the editor."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Insert Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
+        )
+        if not path:
+            return
+
+        # Load image and insert into document
+        image = QImage(path)
+        if image.isNull():
+            return
+
+        # Scale down large images to fit editor width (max 600px)
+        max_width = 600
+        if image.width() > max_width:
+            image = image.scaledToWidth(
+                max_width, Qt.TransformationMode.SmoothTransformation
+            )
+
+        # Register image resource in the document
+        doc = self.editor.document()
+        url = QUrl.fromLocalFile(path)
+        doc.addResource(doc.ResourceType.ImageResource, url, image)
+
+        # Insert image at cursor
+        cursor = self.editor.textCursor()
+        img_fmt = QTextImageFormat()
+        img_fmt.setName(url.toString())
+        img_fmt.setWidth(image.width())
+        img_fmt.setHeight(image.height())
+        cursor.insertImage(img_fmt)
+
+        # Emit signal so notebook widget can track the file
+        self.image_inserted.emit(path)
+
     def _update_toolbar_state(self):
         """Update toolbar button states based on cursor position."""
         fmt = self.editor.currentCharFormat()
@@ -197,8 +329,13 @@ class RichTextEditor(QWidget):
         """Set the editor to read-only mode."""
         self.editor.setReadOnly(read_only)
         for btn in (self.bold_btn, self.italic_btn, self.underline_btn,
-                     self.bullet_btn, self.numbered_btn, self.heading_btn):
+                     self.bullet_btn, self.numbered_btn, self.heading_btn,
+                     self.link_btn, self.image_btn):
             btn.setEnabled(not read_only)
+
+    def set_content(self, html: str):
+        """Alias for set_html — used by notebook_widget.switch_job."""
+        self.set_html(html)
 
     def clear(self):
         """Clear the editor content."""

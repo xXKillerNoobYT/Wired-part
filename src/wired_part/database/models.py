@@ -379,6 +379,18 @@ class NotebookPage:
 
 
 @dataclass
+class NotebookAttachment:
+    id: Optional[int] = None
+    page_id: int = 0
+    filename: str = ""
+    file_path: str = ""
+    file_type: str = ""
+    file_size: int = 0
+    created_by: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+
+@dataclass
 class Hat:
     id: Optional[int] = None
     name: str = ""

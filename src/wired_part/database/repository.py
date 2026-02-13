@@ -15,6 +15,7 @@ from .models import (
     JobNotebook,
     JobPart,
     LaborEntry,
+    NotebookAttachment,
     NotebookPage,
     NotebookSection,
     Notification,
@@ -2527,6 +2528,59 @@ class Repository:
             ORDER BY np.updated_at DESC
         """, tuple(params))
         return [NotebookPage(**dict(r)) for r in rows]
+
+    # ── Notebook Attachments ───────────────────────────────────────
+
+    def create_attachment(self, att: NotebookAttachment) -> int:
+        """Create a notebook page attachment. Returns the new ID."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO notebook_attachments "
+                "(page_id, filename, file_path, file_type, file_size, "
+                "created_by) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (att.page_id, att.filename, att.file_path,
+                 att.file_type, att.file_size, att.created_by),
+            )
+            return cursor.lastrowid
+
+    def get_attachments(self, page_id: int) -> list[NotebookAttachment]:
+        """Get all attachments for a notebook page."""
+        rows = self.db.execute(
+            "SELECT * FROM notebook_attachments "
+            "WHERE page_id = ? ORDER BY created_at DESC, id DESC",
+            (page_id,),
+        )
+        return [
+            NotebookAttachment(**{
+                k: r[k] for k in r.keys()
+                if k in NotebookAttachment.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_attachment_by_id(
+        self, attachment_id: int
+    ) -> Optional[NotebookAttachment]:
+        """Get a single attachment by ID."""
+        rows = self.db.execute(
+            "SELECT * FROM notebook_attachments WHERE id = ?",
+            (attachment_id,),
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        return NotebookAttachment(**{
+            k: r[k] for k in r.keys()
+            if k in NotebookAttachment.__dataclass_fields__
+        })
+
+    def delete_attachment(self, attachment_id: int):
+        """Delete a notebook attachment by ID."""
+        self.db.execute(
+            "DELETE FROM notebook_attachments WHERE id = ?",
+            (attachment_id,),
+        )
 
     # ── Work Reports ──────────────────────────────────────────────
 

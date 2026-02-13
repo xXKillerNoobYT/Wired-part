@@ -1,6 +1,6 @@
 """Database schema definition, initialization, and migrations."""
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Each statement is a separate string to avoid executescript issues
 _SCHEMA_STATEMENTS = [
@@ -353,6 +353,20 @@ _SCHEMA_STATEMENTS = [
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
     )""",
 
+    # Notebook attachments (files attached to notebook pages)
+    """CREATE TABLE IF NOT EXISTS notebook_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_id INTEGER NOT NULL,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_type TEXT NOT NULL DEFAULT '',
+        file_size INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (page_id) REFERENCES notebook_pages(id) ON DELETE CASCADE,
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    )""",
+
     # Hats (role-based permission groups)
     """CREATE TABLE IF NOT EXISTS hats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -605,6 +619,7 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_notebooks_job ON job_notebooks(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_sections_notebook ON notebook_sections(notebook_id)",
     "CREATE INDEX IF NOT EXISTS idx_pages_section ON notebook_pages(section_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attachments_page ON notebook_attachments(page_id)",
     "CREATE INDEX IF NOT EXISTS idx_hats_name ON hats(name)",
     "CREATE INDEX IF NOT EXISTS idx_user_hats_user ON user_hats(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_user_hats_hat ON user_hats(hat_id)",
@@ -1810,6 +1825,31 @@ def _migrate_v11_to_v12(conn):
             pass  # Column/table may already exist
 
 
+def _migrate_v12_to_v13(conn):
+    """v12 → v13: Notebook attachments table."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS notebook_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_type TEXT NOT NULL DEFAULT '',
+            file_size INTEGER NOT NULL DEFAULT 0,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (page_id) REFERENCES notebook_pages(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_attachments_page ON notebook_attachments(page_id)",
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (13)",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+
+
 def _ensure_required_columns(conn):
     """Safety net: ensure all required columns exist on every table.
 
@@ -1929,6 +1969,8 @@ def initialize_database(db_connection):
                 _migrate_v10_to_v11(conn)
             if version < 12:
                 _migrate_v11_to_v12(conn)
+            if version < 13:
+                _migrate_v12_to_v13(conn)
 
         # Ensure all required columns exist (safety net for edge-case
         # migrations that may have silently failed on ALTER TABLE)
