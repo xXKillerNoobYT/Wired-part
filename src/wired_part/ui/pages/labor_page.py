@@ -195,13 +195,32 @@ class LaborPage(QWidget):
         self.date_to.setDate(d_to)
         self.refresh()
 
+    def _can_view_all_labor(self) -> bool:
+        """Check if current user has labor_view_all permission."""
+        if not self.current_user:
+            return True  # No user context = show all
+        return self.repo.user_has_permission(
+            self.current_user.id, "labor_view_all"
+        )
+
     def refresh(self):
         """Reload labor data based on current filters."""
         date_from = self.date_from.date().toString("yyyy-MM-dd")
         date_to = self.date_to.date().toString("yyyy-MM-dd")
         job_id = self.job_filter.currentData()
+        view_all = self._can_view_all_labor()
 
-        if job_id:
+        if not view_all and self.current_user:
+            # User can only see their own labor entries
+            self._entries = self.repo.get_labor_entries_for_user(
+                self.current_user.id,
+                date_from=date_from, date_to=date_to,
+            )
+            if job_id:
+                self._entries = [
+                    e for e in self._entries if e.job_id == job_id
+                ]
+        elif job_id:
             self._entries = self.repo.get_labor_entries_for_job(
                 job_id, date_from=date_from, date_to=date_to
             )

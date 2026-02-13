@@ -1,6 +1,7 @@
 """Main application window with tabbed interface."""
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
 from wired_part.database.connection import DatabaseConnection
 from wired_part.database.models import User
 from wired_part.database.repository import Repository
+from wired_part.ui.widgets.search_dialog import SearchDialog
+from wired_part.ui.widgets.toast_widget import ToastManager
 from wired_part.utils.constants import (
     APP_NAME,
     DEFAULT_WINDOW_HEIGHT,
@@ -50,7 +53,11 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_status_bar()
         self._setup_background_agents()
+        self._setup_global_shortcuts()
         self._update_status_bar()
+
+        # Toast notification manager
+        self.toast = ToastManager(self)
 
         # Auto-refresh notification count every 60 seconds
         self._notif_timer = QTimer(self)
@@ -345,32 +352,86 @@ class MainWindow(QMainWindow):
             lambda *_: self._update_status_bar()
         )
 
+    def _setup_global_shortcuts(self):
+        """Set up application-wide keyboard shortcuts."""
+        search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        search_shortcut.activated.connect(self._show_search)
+
+    def _show_search(self):
+        """Open the global search dialog."""
+        dlg = SearchDialog(self.repo, self)
+        dlg.result_selected.connect(self._on_search_result)
+        # Center on the main window
+        dlg.move(
+            self.geometry().center().x() - dlg.width() // 2,
+            self.geometry().top() + 100,
+        )
+        dlg.exec()
+
+    def _on_search_result(self, entity_type: str, entity_id: int):
+        """Navigate to a search result."""
+        if entity_type == "job":
+            self.tabs.setCurrentIndex(2)  # Job Tracking tab
+        elif entity_type == "part":
+            self.tabs.setCurrentIndex(1)  # Parts Catalog tab
+        elif entity_type == "order":
+            self.tabs.setCurrentIndex(4)  # Orders tab
+
     def _setup_status_bar(self):
-        """Add status bar with inventory summary and notification count."""
+        """Add status bar with clock status, inventory summary, and search hint."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
+        self.clock_status_label = QLabel("")
         self.status_label = QLabel("Ready")
         self.parts_count_label = QLabel("Parts: 0")
         self.low_stock_label = QLabel("Low Stock: 0")
         self.notification_label = QLabel("Notifications: 0")
+        self.search_hint_label = QLabel("Ctrl+K: Search")
+        self.search_hint_label.setStyleSheet(
+            "color: #585b70; font-size: 10px; padding: 0 6px;"
+        )
         self.user_label = QLabel(
             f"User: {self.current_user.display_name}"
         )
 
+        self.status_bar.addWidget(self.clock_status_label)
         self.status_bar.addWidget(self.status_label, 1)
+        self.status_bar.addPermanentWidget(self.search_hint_label)
         self.status_bar.addPermanentWidget(self.notification_label)
         self.status_bar.addPermanentWidget(self.parts_count_label)
         self.status_bar.addPermanentWidget(self.low_stock_label)
         self.status_bar.addPermanentWidget(self.user_label)
 
     def _update_status_bar(self):
-        """Refresh status bar counts."""
+        """Refresh status bar counts including clock-in status."""
         summary = self.repo.get_inventory_summary()
         total = summary.get("total_parts", 0)
         low = summary.get("low_stock_count", 0)
         self.parts_count_label.setText(f"Parts: {total}")
         self.low_stock_label.setText(f"Low Stock: {low}")
+
+        # Update clock-in status
+        active = self.repo.get_active_clock_in(self.current_user.id)
+        if active:
+            job_label = active.job_number or f"Job #{active.job_id}"
+            start = ""
+            if active.start_time:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(str(active.start_time))
+                    start = dt.strftime(" since %I:%M %p")
+                except (ValueError, TypeError):
+                    pass
+            self.clock_status_label.setText(
+                f"Clocked in: {job_label}{start}"
+            )
+            self.clock_status_label.setStyleSheet(
+                "color: #a6e3a1; font-weight: bold; padding: 0 8px;"
+            )
+        else:
+            self.clock_status_label.setText("")
+            self.clock_status_label.setStyleSheet("")
 
         unread = self.repo.get_unread_count(self.current_user.id)
         if unread > 0:
