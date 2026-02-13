@@ -4,6 +4,30 @@ All notable changes to Wired-Part are documented here.
 
 ---
 
+## [12.1.0] - 2026-02-12
+
+### Added
+- **Cross-platform GPS module** (`utils/gps.py`) — unified GPS interface for Windows (PowerShell), macOS (CoreLocation), and Linux (GeoClue2) with graceful fallback to manual entry
+- **Platform utilities** (`utils/platform.py`) — font family detection, primary font name, and platform identification
+- **Cross-platform font stack** — QSS uses `{{FONT_FAMILY}}` placeholder, resolved at runtime to Segoe UI (Windows), .AppleSystemUIFont (macOS), or Ubuntu/Noto Sans (Linux)
+- 36 new tests for GPS module and platform utilities
+
+### Changed
+- `clock_dialog.py` — replaced inline PowerShell GPS with shared `fetch_gps()` from `utils/gps.py`
+- `job_dialog.py` — replaced inline PowerShell GPS with shared `fetch_gps()` from `utils/gps.py`
+- `app.py` — uses `get_primary_font_name()` for QFont and injects platform font into QSS
+- Converted all dialog-level `setFixedSize()` to `setMinimumSize()` for DPI flexibility (login, category, job assign, truck dialogs)
+- QSS themes use `{{FONT_FAMILY}}` placeholder instead of hardcoded "Segoe UI"
+
+### Platform Support
+| Platform | GPS Auto-Detect | Font | Status |
+|----------|----------------|------|--------|
+| Windows | PowerShell Location API | Segoe UI | Full support |
+| macOS | CoreLocation (optional pyobjc) | .AppleSystemUIFont | GPS needs pyobjc |
+| Linux | GeoClue2 (where-am-i) | Ubuntu/Noto Sans | GPS needs geoclue-2.0 |
+
+---
+
 ## [12.0.0] - 2026-02-12
 
 ### Added

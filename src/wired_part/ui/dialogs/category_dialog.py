@@ -32,7 +32,7 @@ class CategoryDialog(QDialog):
         self.setWindowTitle(
             "Edit Category" if self.editing else "Add Category"
         )
-        self.setFixedSize(400, 300)
+        self.setMinimumSize(400, 300)
         self._setup_ui()
         if self.editing:
             self._populate()

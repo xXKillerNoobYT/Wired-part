@@ -168,7 +168,7 @@ class LoginDialog(QDialog):
         self._cards: list[_UserCard] = []
 
         self.setWindowTitle("Wired-Part — Login")
-        self.setFixedSize(420, 480)
+        self.setMinimumSize(420, 480)
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowContextHelpButtonHint
         )
@@ -342,7 +342,7 @@ class FirstRunDialog(QDialog):
         self.created_user = None
 
         self.setWindowTitle("Wired-Part — First Time Setup")
-        self.setFixedSize(450, 400)
+        self.setMinimumSize(450, 400)
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowContextHelpButtonHint
         )

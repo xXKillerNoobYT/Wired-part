@@ -2,9 +2,7 @@
 
 import json
 import os
-import re
 import shutil
-import subprocess
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -29,63 +27,26 @@ from PySide6.QtWidgets import (
 from wired_part.config import Config
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import LABOR_SUBTASK_CATEGORIES
+from wired_part.utils.gps import GPSError, fetch_gps, is_gps_available
 
 
 class _LocationWorker(QThread):
-    """Background thread to fetch device GPS coordinates."""
+    """Background thread to fetch device GPS coordinates.
+
+    Uses the cross-platform GPS module which supports Windows, macOS,
+    and Linux with automatic fallback to manual entry.
+    """
 
     location_found = Signal(float, float)  # lat, lon
     location_error = Signal(str)           # error message
 
     def run(self):
-        """Try to get location via Windows Location API (PowerShell)."""
+        """Try to get location using platform-appropriate method."""
         try:
-            ps_script = (
-                "Add-Type -AssemblyName System.Device; "
-                "$w = New-Object System.Device.Location.GeoCoordinateWatcher; "
-                "$w.Start(); "
-                "$timeout = 10; $elapsed = 0; "
-                "while ($w.Status -ne 'Ready' -and $elapsed -lt $timeout) "
-                "{ Start-Sleep -Milliseconds 500; $elapsed += 0.5 }; "
-                "if ($w.Status -eq 'Ready') { "
-                "$c = $w.Position.Location; "
-                "Write-Output \"$($c.Latitude),$($c.Longitude)\" } "
-                "else { Write-Output 'FAILED' }; "
-                "$w.Stop()"
-            )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True, text=True, timeout=15,
-            )
-            # Strip ANSI / VS Code terminal escape sequences that
-            # can leak into subprocess stdout (e.g. \x1b]633;…\x07)
-            raw = result.stdout
-            output = re.sub(
-                r"\x1b\].*?\x07"   # OSC sequences (VS Code terminal)
-                r"|\x1b\[[0-9;]*[A-Za-z]"  # CSI sequences
-                r"|\x1b[^[\]].?",  # Other ESC sequences
-                "", raw,
-            ).strip()
-            if output and output != "FAILED" and "," in output:
-                parts = output.split(",")
-                lat = float(parts[0])
-                lon = float(parts[1])
-                self.location_found.emit(lat, lon)
-            else:
-                self.location_error.emit(
-                    "Location unavailable. Enable Location Services "
-                    "in Windows Settings > Privacy > Location."
-                )
-        except subprocess.TimeoutExpired:
-            self.location_error.emit(
-                "Location request timed out. Enable Location Services "
-                "in Windows Settings."
-            )
-        except Exception as e:
-            self.location_error.emit(
-                f"Could not get location: {e}\n"
-                "You can paste coordinates manually from Google Maps."
-            )
+            lat, lon = fetch_gps()
+            self.location_found.emit(lat, lon)
+        except GPSError as e:
+            self.location_error.emit(str(e))
 
 
 class _PhotoSection(QGroupBox):
@@ -283,7 +244,7 @@ class ClockInDialog(QDialog):
 
         self.locate_btn = QPushButton("Get My Location")
         self.locate_btn.setToolTip(
-            "Auto-detect your GPS location using Windows Location Services"
+            "Auto-detect your GPS location"
         )
         self.locate_btn.clicked.connect(self._on_get_location)
         gps_layout.addRow("", self.locate_btn)
@@ -511,7 +472,7 @@ class ClockOutDialog(QDialog):
 
         self.locate_btn = QPushButton("Get My Location")
         self.locate_btn.setToolTip(
-            "Auto-detect your GPS location using Windows Location Services"
+            "Auto-detect your GPS location"
         )
         self.locate_btn.clicked.connect(self._on_get_location)
         gps_layout.addRow("", self.locate_btn)

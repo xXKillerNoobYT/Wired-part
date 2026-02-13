@@ -1,7 +1,5 @@
 """Add / Edit Job dialog with GPS location support."""
 
-import re
-import subprocess
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -24,6 +22,7 @@ from wired_part.config import Config
 from wired_part.database.models import Job
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import JOB_STATUSES
+from wired_part.utils.gps import GPSError, fetch_gps
 
 
 class _JobLocationWorker(QThread):
@@ -34,38 +33,10 @@ class _JobLocationWorker(QThread):
 
     def run(self):
         try:
-            ps_script = (
-                "Add-Type -AssemblyName System.Device; "
-                "$w = New-Object System.Device.Location.GeoCoordinateWatcher; "
-                "$w.Start(); "
-                "$timeout = 10; $elapsed = 0; "
-                "while ($w.Status -ne 'Ready' -and $elapsed -lt $timeout) "
-                "{ Start-Sleep -Milliseconds 500; $elapsed += 0.5 }; "
-                "if ($w.Status -eq 'Ready') { "
-                "$c = $w.Position.Location; "
-                "Write-Output \"$($c.Latitude),$($c.Longitude)\" } "
-                "else { Write-Output 'FAILED' }; "
-                "$w.Stop()"
-            )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True, text=True, timeout=15,
-            )
-            # Strip ANSI / VS Code terminal escape sequences
-            raw = result.stdout
-            output = re.sub(
-                r"\x1b\].*?\x07"
-                r"|\x1b\[[0-9;]*[A-Za-z]"
-                r"|\x1b[^[\]].?",
-                "", raw,
-            ).strip()
-            if output and output != "FAILED" and "," in output:
-                parts = output.split(",")
-                self.location_found.emit(float(parts[0]), float(parts[1]))
-            else:
-                self.location_error.emit("Location unavailable.")
-        except Exception as e:
-            self.location_error.emit(f"Could not get location: {e}")
+            lat, lon = fetch_gps()
+            self.location_found.emit(lat, lon)
+        except GPSError as e:
+            self.location_error.emit(str(e))
 
 
 class JobDialog(QDialog):

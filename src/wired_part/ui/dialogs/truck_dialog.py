@@ -26,7 +26,7 @@ class TruckDialog(QDialog):
         self.editing = truck is not None
 
         self.setWindowTitle("Edit Truck" if self.editing else "Add Truck")
-        self.setFixedSize(400, 320)
+        self.setMinimumSize(400, 320)
         self._setup_ui()
         if self.editing:
             self._populate()

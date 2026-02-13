@@ -8,7 +8,7 @@ QMainWindow, QDialog {
 QWidget {
     background-color: #eff1f5;
     color: #4c4f69;
-    font-family: "Segoe UI", sans-serif;
+    font-family: {{FONT_FAMILY}};
     font-size: 10pt;
 }
 

@@ -23,7 +23,7 @@ class JobAssignDialog(QDialog):
         self.job_id = job_id
 
         self.setWindowTitle("Assign User to Job")
-        self.setFixedSize(350, 200)
+        self.setMinimumSize(350, 200)
         self._setup_ui()
 
     def _setup_ui(self):

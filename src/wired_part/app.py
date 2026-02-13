@@ -9,15 +9,24 @@ from PySide6.QtWidgets import QApplication
 from wired_part.config import Config
 from wired_part.database.connection import DatabaseConnection
 from wired_part.database.schema import initialize_database
+from wired_part.utils.platform import get_font_family, get_primary_font_name
 
 
 def _load_theme(app: QApplication):
-    """Load the configured QSS theme stylesheet."""
+    """Load the configured QSS theme stylesheet.
+
+    Injects the platform-appropriate font-family into the QSS before
+    applying it, so the stylesheet always references the correct native
+    font for the current OS.
+    """
     theme = Config.APP_THEME.lower()
     styles_dir = Path(__file__).parent / "ui" / "styles"
     qss_file = styles_dir / f"{theme}.qss"
     if qss_file.exists():
-        app.setStyleSheet(qss_file.read_text(encoding="utf-8"))
+        qss = qss_file.read_text(encoding="utf-8")
+        # Replace the placeholder with platform-specific font stack
+        qss = qss.replace("{{FONT_FAMILY}}", get_font_family())
+        app.setStyleSheet(qss)
 
 
 def _login(repo) -> "User | None":
@@ -50,8 +59,9 @@ def main():
     app.setApplicationName("Wired-Part")
     app.setOrganizationName("WeirdToo LLC")
 
-    # Set application font before theme to avoid -1 pointSize warnings
-    font = QFont("Segoe UI", 10)
+    # Set application font (platform-aware) before theme to avoid
+    # -1 pointSize warnings
+    font = QFont(get_primary_font_name(), 10)
     app.setFont(font)
 
     # Apply theme
