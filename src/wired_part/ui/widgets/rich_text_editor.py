@@ -1,7 +1,7 @@
 """Rich text editor widget with formatting toolbar — for notebook pages."""
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QTextCharFormat, QTextListFormat
+from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextListFormat
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -165,13 +165,13 @@ class RichTextEditor(QWidget):
             fmt = QTextCharFormat()
             fmt.setFontPointSize(10)
             fmt.setFontWeight(QFont.Normal)
-            cursor.select(cursor.BlockUnderCursor)
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
             cursor.mergeCharFormat(fmt)
         else:
             fmt = QTextCharFormat()
             fmt.setFontPointSize(16)
             fmt.setFontWeight(QFont.Bold)
-            cursor.select(cursor.BlockUnderCursor)
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
             cursor.mergeCharFormat(fmt)
 
     def _update_toolbar_state(self):

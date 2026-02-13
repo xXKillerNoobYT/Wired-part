@@ -11,8 +11,14 @@ from wired_part.utils.constants import (
     DEFAULT_HAT_PERMISSIONS,
     FULL_ACCESS_HATS,
     HAT_NAMES,
+    LOCKED_HAT_IDS,
     PERMISSION_KEYS,
 )
+
+# Convenience aliases for the new hat names
+ADMIN_HAT = "Admin / CEO / Owner"
+IT_HAT = "IT / Tech Junkie"
+OFFICE_HAT = "Office / HR"
 
 
 @pytest.fixture
@@ -33,7 +39,7 @@ def admin_user(repo):
     )
     user.id = repo.create_user(user)
     # Assign Admin hat
-    admin_hat = repo.get_hat_by_name("Admin")
+    admin_hat = repo.get_hat_by_name(ADMIN_HAT)
     repo.assign_hat(user.id, admin_hat.id)
     return user
 
@@ -67,13 +73,13 @@ class TestHatSeeding:
         assert len(hats) == len(HAT_NAMES)
 
     def test_admin_hat_has_all_permissions(self, repo):
-        admin_hat = repo.get_hat_by_name("Admin")
+        admin_hat = repo.get_hat_by_name(ADMIN_HAT)
         assert admin_hat is not None
         perms = admin_hat.permission_list
         assert set(perms) == set(PERMISSION_KEYS)
 
     def test_it_hat_has_all_permissions(self, repo):
-        it_hat = repo.get_hat_by_name("IT")
+        it_hat = repo.get_hat_by_name(IT_HAT)
         assert it_hat is not None
         perms = it_hat.permission_list
         assert set(perms) == set(PERMISSION_KEYS)
@@ -90,16 +96,16 @@ class TestHatCRUD:
     """Test hat CRUD operations."""
 
     def test_get_hat_by_name(self, repo):
-        hat = repo.get_hat_by_name("Admin")
+        hat = repo.get_hat_by_name(ADMIN_HAT)
         assert hat is not None
-        assert hat.name == "Admin"
+        assert hat.name == ADMIN_HAT
         assert hat.is_system == 1
 
     def test_get_hat_by_id(self, repo):
-        admin = repo.get_hat_by_name("Admin")
+        admin = repo.get_hat_by_name(ADMIN_HAT)
         hat = repo.get_hat_by_id(admin.id)
         assert hat is not None
-        assert hat.name == "Admin"
+        assert hat.name == ADMIN_HAT
 
     def test_update_hat_permissions(self, repo):
         worker_hat = repo.get_hat_by_name("Worker")
@@ -123,6 +129,77 @@ class TestHatCRUD:
         assert fetched.is_system == 0
         assert fetched.permission_list == ["tab_dashboard"]
 
+    def test_rename_hat(self, repo):
+        """Renaming a hat works for any hat."""
+        worker_hat = repo.get_hat_by_name("Worker")
+        repo.rename_hat(worker_hat.id, "Field Worker")
+        renamed = repo.get_hat_by_id(worker_hat.id)
+        assert renamed.name == "Field Worker"
+
+    def test_rename_locked_hat_allowed(self, repo):
+        """Locked hats can still be renamed."""
+        admin_hat = repo.get_hat_by_name(ADMIN_HAT)
+        assert admin_hat.id in LOCKED_HAT_IDS
+        repo.rename_hat(admin_hat.id, "Big Boss")
+        renamed = repo.get_hat_by_id(admin_hat.id)
+        assert renamed.name == "Big Boss"
+
+
+class TestLockedHats:
+    """Test that locked hats are protected from permission/deletion changes."""
+
+    def test_locked_hat_ids_exist(self, repo):
+        """All locked hat IDs should correspond to existing hats."""
+        for hat_id in LOCKED_HAT_IDS:
+            hat = repo.get_hat_by_id(hat_id)
+            assert hat is not None, f"Locked hat ID {hat_id} not found"
+
+    def test_cannot_delete_locked_hat(self, repo):
+        admin_hat = repo.get_hat_by_name(ADMIN_HAT)
+        with pytest.raises(ValueError, match="locked"):
+            repo.delete_hat(admin_hat.id)
+
+    def test_cannot_delete_it_hat(self, repo):
+        it_hat = repo.get_hat_by_name(IT_HAT)
+        with pytest.raises(ValueError, match="locked"):
+            repo.delete_hat(it_hat.id)
+
+    def test_cannot_delete_office_hat(self, repo):
+        office_hat = repo.get_hat_by_name(OFFICE_HAT)
+        with pytest.raises(ValueError, match="locked"):
+            repo.delete_hat(office_hat.id)
+
+    def test_cannot_edit_locked_hat_permissions(self, repo):
+        admin_hat = repo.get_hat_by_name(ADMIN_HAT)
+        with pytest.raises(ValueError, match="locked"):
+            repo.update_hat_permissions(admin_hat.id, ["tab_dashboard"])
+
+    def test_cannot_edit_office_hat_permissions(self, repo):
+        office_hat = repo.get_hat_by_name(OFFICE_HAT)
+        with pytest.raises(ValueError, match="locked"):
+            repo.update_hat_permissions(office_hat.id, ["tab_dashboard"])
+
+    def test_can_delete_custom_hat(self, repo):
+        """Non-locked hats can be deleted normally."""
+        hat = Hat(name="Temp", permissions="[]", is_system=0)
+        hat_id = repo.create_hat(hat)
+        repo.delete_hat(hat_id)  # Should not raise
+        assert repo.get_hat_by_id(hat_id) is None
+
+    def test_can_edit_non_locked_hat_permissions(self, repo):
+        """Non-locked system hats can have permissions edited."""
+        worker_hat = repo.get_hat_by_name("Worker")
+        assert worker_hat.id not in LOCKED_HAT_IDS
+        repo.update_hat_permissions(
+            worker_hat.id, ["tab_dashboard", "labor_clock_in"]
+        )
+        updated = repo.get_hat_by_id(worker_hat.id)
+        assert "tab_dashboard" in updated.permission_list
+
+    def test_only_three_hats_are_locked(self, repo):
+        """Only IDs 1, 2, 3 are locked. No others."""
+        assert LOCKED_HAT_IDS == {1, 2, 3}
+
 
 class TestUserHatAssignment:
     """Test assigning hats to users."""
@@ -130,19 +207,19 @@ class TestUserHatAssignment:
     def test_assign_hat(self, repo, admin_user):
         hats = repo.get_user_hats(admin_user.id)
         assert len(hats) == 1
-        assert hats[0].hat_name == "Admin"
+        assert hats[0].hat_name == ADMIN_HAT
 
     def test_get_user_hat_names(self, repo, admin_user):
         names = repo.get_user_hat_names(admin_user.id)
-        assert names == ["Admin"]
+        assert names == [ADMIN_HAT]
 
     def test_assign_multiple_hats(self, repo, admin_user):
-        it_hat = repo.get_hat_by_name("IT")
+        it_hat = repo.get_hat_by_name(IT_HAT)
         repo.assign_hat(admin_user.id, it_hat.id)
 
         names = repo.get_user_hat_names(admin_user.id)
-        assert "Admin" in names
-        assert "IT" in names
+        assert ADMIN_HAT in names
+        assert IT_HAT in names
 
     def test_remove_hat(self, repo, regular_user):
         worker_hat = repo.get_hat_by_name("Worker")
@@ -164,7 +241,7 @@ class TestUserHatAssignment:
         assert set(names) == {"Foreman", "Worker"}
 
     def test_duplicate_assignment_ignored(self, repo, admin_user):
-        admin_hat = repo.get_hat_by_name("Admin")
+        admin_hat = repo.get_hat_by_name(ADMIN_HAT)
         repo.assign_hat(admin_user.id, admin_hat.id)  # Already has it
 
         hats = repo.get_user_hats(admin_user.id)
@@ -227,7 +304,7 @@ class TestPermissions:
             role="user",
         )
         user.id = repo.create_user(user)
-        it_hat = repo.get_hat_by_name("IT")
+        it_hat = repo.get_hat_by_name(IT_HAT)
         repo.assign_hat(user.id, it_hat.id)
 
         perms = repo.get_user_permissions(user.id)

@@ -20,6 +20,52 @@ from wired_part.database.models import LaborEntry, User
 from wired_part.database.repository import Repository
 
 
+# ── Quick-filter date range definitions ──────────────────────────
+
+_QUICK_FILTERS = [
+    "This Period",
+    "Last Period",
+    "Last 3 Months",
+    "Year to Date",
+    "1 Year",
+    "5 Year",
+    "10 Year",
+]
+
+
+def _quick_filter_dates(label: str) -> tuple[QDate, QDate]:
+    """Return (from_date, to_date) for the given quick-filter label."""
+    today = QDate.currentDate()
+
+    if label == "This Period":
+        return QDate(today.year(), today.month(), 1), today
+
+    if label == "Last Period":
+        first_this = QDate(today.year(), today.month(), 1)
+        last_month_end = first_this.addDays(-1)
+        return QDate(
+            last_month_end.year(), last_month_end.month(), 1
+        ), last_month_end
+
+    if label == "Last 3 Months":
+        return today.addMonths(-3), today
+
+    if label == "Year to Date":
+        return QDate(today.year(), 1, 1), today
+
+    if label == "1 Year":
+        return today.addYears(-1), today
+
+    if label == "5 Year":
+        return today.addYears(-5), today
+
+    if label == "10 Year":
+        return today.addYears(-10), today
+
+    # Fallback — current year
+    return QDate(today.year(), 1, 1), today
+
+
 class LaborPage(QWidget):
     """Cross-job labor overview with filtering, summary, and clock-in/out."""
 
@@ -41,13 +87,26 @@ class LaborPage(QWidget):
         layout.setSpacing(8)
         layout.setContentsMargins(8, 8, 8, 8)
 
+        # ── Quick filter row ────────────────────────────────────────
+        quick_row = QHBoxLayout()
+        quick_row.addWidget(QLabel("Quick:"))
+        for label in _QUICK_FILTERS:
+            btn = QPushButton(label)
+            btn.setStyleSheet("padding: 4px 10px;")
+            btn.setToolTip(f"Set date range to {label}")
+            btn.clicked.connect(
+                lambda checked=False, lbl=label: self._apply_quick_filter(lbl)
+            )
+            quick_row.addWidget(btn)
+        quick_row.addStretch()
+        layout.addLayout(quick_row)
+
         # ── Toolbar ───────────────────────────────────────────────
         toolbar = QHBoxLayout()
 
         toolbar.addWidget(QLabel("From:"))
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
-        self.date_from.setDate(self.date_from.date().addMonths(-1))
         self.date_from.setDisplayFormat("yyyy-MM-dd")
         toolbar.addWidget(self.date_from)
 
@@ -56,6 +115,11 @@ class LaborPage(QWidget):
         self.date_to.setCalendarPopup(True)
         self.date_to.setDisplayFormat("yyyy-MM-dd")
         toolbar.addWidget(self.date_to)
+
+        # Default: Year to Date
+        ytd_from, ytd_to = _quick_filter_dates("Year to Date")
+        self.date_from.setDate(ytd_from)
+        self.date_to.setDate(ytd_to)
 
         toolbar.addWidget(QLabel("Job:"))
         self.job_filter = QComboBox()
@@ -123,6 +187,13 @@ class LaborPage(QWidget):
 
         summary_group.setLayout(summary_layout)
         layout.addWidget(summary_group)
+
+    def _apply_quick_filter(self, label: str):
+        """Apply a quick date filter and auto-refresh."""
+        d_from, d_to = _quick_filter_dates(label)
+        self.date_from.setDate(d_from)
+        self.date_to.setDate(d_to)
+        self.refresh()
 
     def refresh(self):
         """Reload labor data based on current filters."""

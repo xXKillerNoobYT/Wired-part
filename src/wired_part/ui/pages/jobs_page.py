@@ -243,6 +243,14 @@ class JobsPage(QWidget):
         self.complete_btn.setEnabled(False)
         action_btns.addWidget(self.complete_btn)
 
+        self.reactivate_btn = QPushButton("Reactivate")
+        self.reactivate_btn.setToolTip(
+            "Reactivate a completed/cancelled job to resume work"
+        )
+        self.reactivate_btn.clicked.connect(self._on_reactivate)
+        self.reactivate_btn.setEnabled(False)
+        action_btns.addWidget(self.reactivate_btn)
+
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.clicked.connect(self._on_delete)
         self.delete_btn.setEnabled(False)
@@ -309,7 +317,8 @@ class JobsPage(QWidget):
         self.total_cost_label.setText("Total: $0.00")
         self.users_list.clear()
         self.labor_summary_label.setText("No labor entries")
-        for btn in (self.edit_btn, self.complete_btn, self.delete_btn,
+        for btn in (self.edit_btn, self.complete_btn, self.reactivate_btn,
+                     self.delete_btn,
                      self.assign_btn, self.remove_part_btn,
                      self.assign_user_btn, self.consume_btn,
                      self.billing_btn,
@@ -375,8 +384,7 @@ class JobsPage(QWidget):
         if labor["entry_count"] > 0:
             self.labor_summary_label.setText(
                 f"{labor['entry_count']} entries — "
-                f"{labor['total_hours']:.1f}h — "
-                f"{format_currency(labor['total_cost'])}"
+                f"{labor['total_hours']:.1f}h"
             )
         else:
             self.labor_summary_label.setText("No labor entries")
@@ -389,8 +397,10 @@ class JobsPage(QWidget):
 
         # Enable buttons
         is_active = job.status == "active"
+        can_reactivate = job.status in ("completed", "cancelled", "on_hold")
         self.edit_btn.setEnabled(True)
         self.complete_btn.setEnabled(is_active)
+        self.reactivate_btn.setEnabled(can_reactivate)
         self.delete_btn.setEnabled(True)
         self.assign_btn.setEnabled(is_active)
         self.remove_part_btn.setEnabled(is_active)
@@ -410,9 +420,19 @@ class JobsPage(QWidget):
     def _on_search(self):
         self.refresh()
 
+    def _user_can_see_bro(self) -> bool:
+        """Check if the current user has office-level access for BRO field."""
+        if not self.current_user:
+            return False
+        return self.repo.user_has_permission(
+            self.current_user.id, "tab_office"
+        )
+
     def _on_add(self):
         from wired_part.ui.dialogs.job_dialog import JobDialog
-        dialog = JobDialog(self.repo, parent=self)
+        dialog = JobDialog(
+            self.repo, parent=self, show_bro=self._user_can_see_bro(),
+        )
         if dialog.exec():
             self.refresh()
 
@@ -420,7 +440,10 @@ class JobsPage(QWidget):
         if not self._selected_job:
             return
         from wired_part.ui.dialogs.job_dialog import JobDialog
-        dialog = JobDialog(self.repo, job=self._selected_job, parent=self)
+        dialog = JobDialog(
+            self.repo, job=self._selected_job, parent=self,
+            show_bro=self._user_can_see_bro(),
+        )
         if dialog.exec():
             self.refresh()
 
@@ -436,6 +459,27 @@ class JobsPage(QWidget):
             self._selected_job.status = "completed"
             self._selected_job.completed_at = datetime.now().isoformat()
             self.repo.update_job(self._selected_job)
+            self.refresh()
+
+    def _on_reactivate(self):
+        """Reactivate a completed/cancelled job so work can resume."""
+        if not self._selected_job:
+            return
+        job = self._selected_job
+        reply = QMessageBox.question(
+            self, "Reactivate Job",
+            f"Reactivate '{job.job_number}'?\n\n"
+            f"Current status: {job.status.title()}\n"
+            "This will set the job back to Active so you can\n"
+            "resume work, log hours, and assign parts.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            job.status = "active"
+            # Keep completed_at for historical record,
+            # but allow the job to function as active again
+            self.repo.update_job(job)
             self.refresh()
 
     def _on_delete(self):

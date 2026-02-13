@@ -202,8 +202,9 @@ class WorkReportDialog(QDialog):
                     lines.append("")
                     lines.append("  Hours by Category:")
                     for cat in by_cat:
+                        name = cat.get("sub_task_category") or "Uncategorized"
                         lines.append(
-                            f"    {cat['category']}: {cat['hours']:.2f}h"
+                            f"    {name}: {cat['hours']:.2f}h"
                         )
             else:
                 lines.append("  No labor entries for this period.")

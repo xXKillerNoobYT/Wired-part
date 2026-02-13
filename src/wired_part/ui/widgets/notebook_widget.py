@@ -274,19 +274,18 @@ class NotebookWidget(QWidget):
         self.status_label.setStyleSheet(
             "color: #a6e3a1; font-size: 11px;"
         )
-        # Reset status after 3 seconds
-        QTimer.singleShot(
-            3000,
-            lambda: self.status_label.setText("Ready")
-            if self.status_label.text() == "Saved" else None,
-        )
-        QTimer.singleShot(
-            3000,
-            lambda: self.status_label.setStyleSheet(
-                "color: #6c7086; font-size: 11px;"
-            )
-            if self.status_label.text() == "Ready" else None,
-        )
+        # Reset status after 3 seconds (guard against deleted widget)
+        def _reset_status():
+            try:
+                if self.status_label.text() == "Saved":
+                    self.status_label.setText("Ready")
+                    self.status_label.setStyleSheet(
+                        "color: #6c7086; font-size: 11px;"
+                    )
+            except RuntimeError:
+                pass  # Widget already deleted
+
+        QTimer.singleShot(3000, _reset_status)
 
         # Update the page title in the list
         current_item = self.pages_list.currentItem()

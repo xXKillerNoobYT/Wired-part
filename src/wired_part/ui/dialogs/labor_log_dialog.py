@@ -182,8 +182,9 @@ class LaborLogDialog(QDialog):
         if by_cat:
             parts = []
             for cat in by_cat:
+                name = cat.get("sub_task_category") or "Uncategorized"
                 parts.append(
-                    f"{cat['category']}: {cat['hours']:.1f}h"
+                    f"{name}: {cat['hours']:.1f}h"
                 )
             self.category_summary_label.setText(
                 "By Category: " + " | ".join(parts)

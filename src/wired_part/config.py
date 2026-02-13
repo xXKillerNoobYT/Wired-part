@@ -113,6 +113,22 @@ class Config:
         os.getenv("DEFAULT_BILLING_DAY", "1"),
     ))
 
+    # Timesheet Report cycle (separate from billing)
+    TIMESHEET_CYCLE: str = _runtime.get(
+        "timesheet_cycle",
+        os.getenv("TIMESHEET_CYCLE", "weekly"),
+    )
+    TIMESHEET_DAY: int = int(_runtime.get(
+        "timesheet_day",
+        os.getenv("TIMESHEET_DAY", "1"),
+    ))
+
+    # Bill Out Rate (BRO) categories — customizable via Settings
+    BRO_CATEGORIES: list = _runtime.get(
+        "bro_categories",
+        None,  # None = use DEFAULT_BRO_CATEGORIES from constants
+    )
+
     # Notebook template (settings.json overrides default sections)
     NOTEBOOK_SECTIONS_TEMPLATE: list = _runtime.get(
         "notebook_sections_template",
@@ -200,12 +216,58 @@ class Config:
         _save_settings(settings)
 
     @classmethod
+    def update_timesheet_settings(cls, cycle: str, day: int):
+        """Update timesheet report cycle and persist."""
+        cls.TIMESHEET_CYCLE = cycle
+        cls.TIMESHEET_DAY = day
+
+        settings = _load_settings()
+        settings["timesheet_cycle"] = cycle
+        settings["timesheet_day"] = day
+        _save_settings(settings)
+
+    @classmethod
+    def update_order_settings(cls, po_prefix: str, ra_prefix: str,
+                              auto_close: bool):
+        """Update order/return settings and persist."""
+        cls.ORDER_NUMBER_PREFIX = po_prefix
+        cls.RA_NUMBER_PREFIX = ra_prefix
+        cls.AUTO_CLOSE_RECEIVED_ORDERS = auto_close
+
+        settings = _load_settings()
+        settings["order_number_prefix"] = po_prefix
+        settings["ra_number_prefix"] = ra_prefix
+        settings["auto_close_received_orders"] = auto_close
+        _save_settings(settings)
+
+    @classmethod
     def update_notebook_template(cls, sections: list[str]):
         """Update the default notebook sections template and persist."""
         cls.NOTEBOOK_SECTIONS_TEMPLATE = sections
 
         settings = _load_settings()
         settings["notebook_sections_template"] = sections
+        _save_settings(settings)
+
+    @classmethod
+    def get_bro_categories(cls) -> list[str]:
+        """Get the BRO categories list.
+
+        Returns custom list if set, otherwise falls back
+        to DEFAULT_BRO_CATEGORIES from constants.
+        """
+        if cls.BRO_CATEGORIES:
+            return list(cls.BRO_CATEGORIES)
+        from wired_part.utils.constants import DEFAULT_BRO_CATEGORIES
+        return list(DEFAULT_BRO_CATEGORIES)
+
+    @classmethod
+    def update_bro_categories(cls, categories: list[str]):
+        """Update the BRO categories list and persist."""
+        cls.BRO_CATEGORIES = categories
+
+        settings = _load_settings()
+        settings["bro_categories"] = categories
         _save_settings(settings)
 
     @classmethod

@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -77,6 +78,31 @@ class AgentPage(QWidget):
         header.addWidget(self.clear_btn)
 
         layout.addLayout(header)
+
+        # Model selector row — quick model switching without leaving Agent tab
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(300)
+        self.model_combo.lineEdit().setPlaceholderText(
+            "Type a model name or click Refresh to load from server"
+        )
+        self.model_combo.addItem(Config.LM_STUDIO_MODEL)
+        self.model_combo.setCurrentText(Config.LM_STUDIO_MODEL)
+        model_row.addWidget(self.model_combo, 1)
+
+        refresh_models_btn = QPushButton("Refresh Models")
+        refresh_models_btn.setToolTip("Fetch available models from LM Studio")
+        refresh_models_btn.clicked.connect(self._fetch_and_populate_models)
+        model_row.addWidget(refresh_models_btn)
+
+        apply_model_btn = QPushButton("Apply")
+        apply_model_btn.setToolTip("Switch to the selected model")
+        apply_model_btn.clicked.connect(self._apply_model_selection)
+        model_row.addWidget(apply_model_btn)
+
+        layout.addLayout(model_row)
 
         # Background agents status panel
         bg_group = QGroupBox("Background Agents")
@@ -174,6 +200,9 @@ class AgentPage(QWidget):
             f"LM Studio @ {Config.LM_STUDIO_BASE_URL}  |  "
             f"Model: {Config.LM_STUDIO_MODEL}"
         )
+        # Sync the model combo if the model was changed in Settings
+        if self.model_combo.currentText() != Config.LM_STUDIO_MODEL:
+            self.model_combo.setCurrentText(Config.LM_STUDIO_MODEL)
 
         # Auto-reconnect if config changed since last connect
         current_url = Config.LM_STUDIO_BASE_URL
@@ -204,6 +233,77 @@ class AgentPage(QWidget):
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
             self.send_btn.setEnabled(False)
             self.message_input.setEnabled(False)
+
+    def _fetch_and_populate_models(self):
+        """Fetch available models from the LLM server and populate combo."""
+        if not self.client:
+            self.chat_display.append(
+                "<br><i style='color: red;'>Not connected. "
+                "Click Connect first.</i>"
+            )
+            return
+        try:
+            from openai import OpenAI
+            import httpx
+            oc = OpenAI(
+                base_url=Config.LM_STUDIO_BASE_URL,
+                api_key=Config.LM_STUDIO_API_KEY,
+                timeout=httpx.Timeout(10.0),
+            )
+            models = oc.models.list()
+            model_names = sorted([m.id for m in models.data])
+
+            if not model_names:
+                self.chat_display.append(
+                    "<br><i style='color: orange;'>No models found "
+                    "on the server.</i>"
+                )
+                return
+
+            current = self.model_combo.currentText()
+            self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            for name in model_names:
+                self.model_combo.addItem(name)
+            # Restore user's selection or keep the first
+            idx = self.model_combo.findText(current)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            elif current:
+                self.model_combo.insertItem(0, current)
+                self.model_combo.setCurrentIndex(0)
+            self.model_combo.blockSignals(False)
+
+            self.chat_display.append(
+                f"<br><i style='color: green;'>Found {len(model_names)} "
+                f"model(s). Select one and click Apply.</i>"
+            )
+        except Exception as e:
+            self.chat_display.append(
+                f"<br><i style='color: red;'>Failed to fetch models: "
+                f"{e}</i>"
+            )
+
+    def _apply_model_selection(self):
+        """Apply the selected model — saves to Config and reconnects."""
+        model = self.model_combo.currentText().strip()
+        if not model:
+            return
+        Config.update_llm_settings(
+            Config.LM_STUDIO_BASE_URL,
+            Config.LM_STUDIO_API_KEY,
+            model,
+            Config.LM_STUDIO_TIMEOUT,
+        )
+        self.connection_label.setText(
+            f"LM Studio @ {Config.LM_STUDIO_BASE_URL}  |  "
+            f"Model: {model}"
+        )
+        self._try_connect()
+        self.chat_display.append(
+            f"<br><i style='color: green;'>Switched to model: "
+            f"<b>{model}</b></i>"
+        )
 
     def _on_send(self):
         """Send the user's message to the LLM."""

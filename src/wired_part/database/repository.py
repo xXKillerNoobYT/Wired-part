@@ -270,7 +270,8 @@ class Repository:
                     part_type = ?, brand_id = ?, brand_part_number = ?,
                     local_part_number = ?, image_path = ?, subcategory = ?,
                     color_options = ?, type_style = ?, has_qr_tag = ?,
-                    pdfs = ?
+                    pdfs = ?, deprecation_status = ?,
+                    deprecation_started_at = ?
                 WHERE id = ?
             """, (
                 part.part_number, part.description, part.quantity,
@@ -280,8 +281,10 @@ class Repository:
                 part.part_type, part.brand_id, part.brand_part_number,
                 part.local_part_number, part.image_path, part.subcategory,
                 part.color_options, part.type_style, part.has_qr_tag,
-                part.pdfs, part.id,
+                part.pdfs, part.deprecation_status,
+                part.deprecation_started_at, part.id,
             ))
+        self._try_advance_if_deprecating(part.id)
 
     def delete_part(self, part_id: int):
         with self.db.get_connection() as conn:
@@ -514,11 +517,12 @@ class Repository:
             cursor = conn.execute("""
                 INSERT INTO jobs
                     (job_number, name, customer, address, status,
-                     priority, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     priority, notes, bill_out_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job.job_number, job.name, job.customer,
                 job.address, job.status, job.priority, job.notes,
+                job.bill_out_rate,
             ))
             return cursor.lastrowid
 
@@ -528,12 +532,13 @@ class Repository:
                 UPDATE jobs SET
                     job_number = ?, name = ?, customer = ?,
                     address = ?, status = ?, priority = ?,
-                    notes = ?, completed_at = ?
+                    notes = ?, bill_out_rate = ?, completed_at = ?
                 WHERE id = ?
             """, (
                 job.job_number, job.name, job.customer,
                 job.address, job.status, job.priority,
-                job.notes, job.completed_at, job.id,
+                job.notes, job.bill_out_rate, job.completed_at,
+                job.id,
             ))
 
     def delete_job(self, job_id: int):
@@ -709,6 +714,24 @@ class Repository:
             """)
         return [Truck(**dict(r)) for r in rows]
 
+    def get_trucks_for_job(self, job_id: int) -> list[Truck]:
+        """Get active trucks whose assigned user is also assigned to this job.
+
+        Only trucks owned by users who are assigned to the same job
+        will appear in the consume-from-truck dropdown.
+        """
+        rows = self.db.execute("""
+            SELECT t.*, COALESCE(u.display_name, '') AS assigned_user_name
+            FROM trucks t
+            LEFT JOIN users u ON t.assigned_user_id = u.id
+            WHERE t.is_active = 1
+              AND t.assigned_user_id IN (
+                  SELECT user_id FROM job_assignments WHERE job_id = ?
+              )
+            ORDER BY t.truck_number
+        """, (job_id,))
+        return [Truck(**dict(r)) for r in rows]
+
     def get_truck_by_id(self, truck_id: int) -> Optional[Truck]:
         rows = self.db.execute("""
             SELECT t.*, COALESCE(u.display_name, '') AS assigned_user_name
@@ -834,6 +857,8 @@ class Repository:
         """Create an outbound transfer (warehouse -> truck).
 
         Immediately deducts from warehouse stock. Transfer starts as 'pending'.
+        If supplier_id/source_order_id are set on the transfer, they are
+        preserved for supply chain traceability (v12).
         """
         with self.db.get_connection() as conn:
             # Validate warehouse stock
@@ -855,15 +880,33 @@ class Repository:
                 (transfer.quantity, transfer.part_id),
             )
 
-            # Create transfer record
+            # v12: If no supplier set, try to find the most recent supplier
+            # for this part from the receive log
+            supplier_id = transfer.supplier_id
+            source_order_id = transfer.source_order_id
+            if not supplier_id:
+                recent = conn.execute("""
+                    SELECT rl.supplier_id, poi.order_id
+                    FROM receive_log rl
+                    JOIN purchase_order_items poi
+                        ON rl.order_item_id = poi.id
+                    WHERE poi.part_id = ? AND rl.supplier_id IS NOT NULL
+                    ORDER BY rl.received_at DESC LIMIT 1
+                """, (transfer.part_id,)).fetchone()
+                if recent:
+                    supplier_id = recent["supplier_id"]
+                    source_order_id = recent["order_id"]
+
+            # Create transfer record (v12: with supplier tracking)
             cursor = conn.execute("""
                 INSERT INTO truck_transfers
                     (truck_id, part_id, quantity, direction, status,
-                     created_by, notes)
-                VALUES (?, ?, ?, 'outbound', 'pending', ?, ?)
+                     created_by, notes, source_order_id, supplier_id)
+                VALUES (?, ?, ?, 'outbound', 'pending', ?, ?, ?, ?)
             """, (
                 transfer.truck_id, transfer.part_id, transfer.quantity,
                 transfer.created_by, transfer.notes,
+                source_order_id, supplier_id,
             ))
             return cursor.lastrowid
 
@@ -895,6 +938,8 @@ class Repository:
                     received_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (received_by, transfer_id))
+            _part_id = row["part_id"]
+        self._try_advance_if_deprecating(_part_id)
 
     def cancel_transfer(self, transfer_id: int):
         """Cancel a pending transfer — restores warehouse stock."""
@@ -959,7 +1004,9 @@ class Repository:
                 VALUES (?, ?, ?, 'return', 'received', ?, ?,
                         CURRENT_TIMESTAMP)
             """, (truck_id, part_id, quantity, user_id, user_id))
-            return cursor.lastrowid
+            transfer_id = cursor.lastrowid
+        self._try_advance_if_deprecating(part_id)
+        return transfer_id
 
     def get_truck_transfers(self, truck_id: int,
                             status: Optional[str] = None
@@ -1040,7 +1087,8 @@ class Repository:
         """Consume parts from a truck's on-hand inventory for a job.
 
         Deducts from truck_inventory, creates job_parts record and
-        consumption_log entry.
+        consumption_log entry. Propagates supplier origin from the
+        most recent truck transfer for this part (v12).
         """
         with self.db.get_connection() as conn:
             # Validate truck has enough on-hand
@@ -1062,6 +1110,21 @@ class Repository:
             ).fetchone()
             unit_cost = part_row["unit_cost"] if part_row else 0.0
 
+            # v12: Look up supplier origin from most recent received
+            # transfer for this part on this truck
+            supplier_row = conn.execute("""
+                SELECT supplier_id, source_order_id
+                FROM truck_transfers
+                WHERE truck_id = ? AND part_id = ?
+                  AND status = 'received' AND direction = 'outbound'
+                  AND supplier_id IS NOT NULL
+                ORDER BY received_at DESC LIMIT 1
+            """, (truck_id, part_id)).fetchone()
+            supplier_id = supplier_row["supplier_id"] if supplier_row else None
+            source_order_id = (
+                supplier_row["source_order_id"] if supplier_row else None
+            )
+
             # Deduct from truck on-hand
             conn.execute(
                 "UPDATE truck_inventory SET quantity = quantity - ? "
@@ -1069,29 +1132,101 @@ class Repository:
                 (quantity, truck_id, part_id),
             )
 
-            # Add to job_parts (or update existing)
+            # v12: Enforce one-supplier-per-part-per-job rule
+            existing_jp = conn.execute(
+                "SELECT supplier_id FROM job_parts "
+                "WHERE job_id = ? AND part_id = ?",
+                (job_id, part_id),
+            ).fetchone()
+            if (existing_jp and existing_jp["supplier_id"]
+                    and supplier_id
+                    and existing_jp["supplier_id"] != supplier_id):
+                raise ValueError(
+                    f"Supplier conflict: part {part_id} on job "
+                    f"{job_id} is already supplied by supplier "
+                    f"{existing_jp['supplier_id']}; cannot consume "
+                    f"from supplier {supplier_id}. A part must "
+                    f"come from the same supplier for the entire job."
+                )
+
+            # Add to job_parts (or update existing) — v12: with supplier
             conn.execute("""
                 INSERT INTO job_parts
                     (job_id, part_id, quantity_used, unit_cost_at_use,
-                     consumed_from_truck_id, consumed_by, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     consumed_from_truck_id, consumed_by,
+                     supplier_id, source_order_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, part_id) DO UPDATE SET
-                    quantity_used = quantity_used + excluded.quantity_used
+                    quantity_used = quantity_used + excluded.quantity_used,
+                    supplier_id = COALESCE(excluded.supplier_id,
+                                           job_parts.supplier_id),
+                    source_order_id = COALESCE(excluded.source_order_id,
+                                               job_parts.source_order_id)
             """, (
                 job_id, part_id, quantity, unit_cost,
-                truck_id, user_id, notes,
+                truck_id, user_id, supplier_id, source_order_id, notes,
             ))
 
-            # Create consumption log entry
+            # Create consumption log entry — v12: with supplier
             cursor = conn.execute("""
                 INSERT INTO consumption_log
                     (job_id, truck_id, part_id, quantity,
-                     unit_cost_at_use, consumed_by, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     unit_cost_at_use, consumed_by,
+                     supplier_id, source_order_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id, truck_id, part_id, quantity,
-                unit_cost, user_id, notes,
+                unit_cost, user_id,
+                supplier_id, source_order_id, notes,
             ))
+
+            # Notify truck owner if someone else consumed from their truck
+            truck_row = conn.execute(
+                "SELECT t.assigned_user_id, t.truck_number, t.name, "
+                "       u.display_name AS owner_name "
+                "FROM trucks t "
+                "LEFT JOIN users u ON t.assigned_user_id = u.id "
+                "WHERE t.id = ?",
+                (truck_id,),
+            ).fetchone()
+            if (truck_row and truck_row["assigned_user_id"]
+                    and user_id
+                    and truck_row["assigned_user_id"] != user_id):
+                # Get consuming user's name and part info
+                consumer_row = conn.execute(
+                    "SELECT display_name FROM users WHERE id = ?",
+                    (user_id,),
+                ).fetchone()
+                consumer_name = (consumer_row["display_name"]
+                                 if consumer_row else "Unknown")
+                part_info = conn.execute(
+                    "SELECT part_number, name FROM parts WHERE id = ?",
+                    (part_id,),
+                ).fetchone()
+                part_desc = (f"{part_info['part_number']} "
+                             f"({part_info['name']})"
+                             if part_info else f"Part #{part_id}")
+                job_row = conn.execute(
+                    "SELECT job_number, name FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                job_desc = (f"{job_row['job_number']} - {job_row['name']}"
+                            if job_row else f"Job #{job_id}")
+                truck_desc = (f"{truck_row['truck_number']} "
+                              f"({truck_row['name']})")
+                conn.execute("""
+                    INSERT INTO notifications
+                        (user_id, title, message, severity, source,
+                         target_tab, target_data)
+                    VALUES (?, ?, ?, 'info', 'system', ?, ?)
+                """, (
+                    truck_row["assigned_user_id"],
+                    f"Parts consumed from your truck {truck_desc}",
+                    f"{consumer_name} consumed {quantity}x {part_desc} "
+                    f"from your truck {truck_desc} for job {job_desc}.",
+                    "trucks",
+                    f'{{"truck_id": {truck_id}}}',
+                ))
 
             # Check for low warehouse stock and create alert
             stock_row = conn.execute(
@@ -1115,7 +1250,9 @@ class Repository:
                         f"Consider reordering.",
                     ))
 
-            return cursor.lastrowid
+            log_id = cursor.lastrowid
+        self._try_advance_if_deprecating(part_id)
+        return log_id
 
     def get_consumption_log(self, job_id: int = None,
                             truck_id: int = None) -> list[ConsumptionLog]:
@@ -1151,12 +1288,15 @@ class Repository:
         with self.db.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO notifications
-                    (user_id, title, message, severity, source)
-                VALUES (?, ?, ?, ?, ?)
+                    (user_id, title, message, severity, source,
+                     target_tab, target_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 notification.user_id, notification.title,
                 notification.message, notification.severity,
                 notification.source,
+                notification.target_tab or "",
+                notification.target_data or "",
             ))
             return cursor.lastrowid
 
@@ -1329,7 +1469,8 @@ class Repository:
         """
         if audit_type == "warehouse":
             query = """
-                SELECT p.id AS part_id, p.part_number, p.name,
+                SELECT p.id AS part_id, p.part_number,
+                       p.description AS name,
                        p.quantity AS expected_quantity,
                        p.image_path, p.location,
                        MAX(ia.audited_at) AS last_audited
@@ -1344,7 +1485,8 @@ class Repository:
             params: tuple = ()
         elif audit_type == "truck":
             query = """
-                SELECT ti.part_id, p.part_number, p.name,
+                SELECT ti.part_id, p.part_number,
+                       p.description AS name,
                        ti.quantity AS expected_quantity,
                        p.image_path, p.location,
                        MAX(ia.audited_at) AS last_audited
@@ -1361,7 +1503,8 @@ class Repository:
             params = (target_id, target_id)
         else:  # job
             query = """
-                SELECT jp.part_id, p.part_number, p.name,
+                SELECT jp.part_id, p.part_number,
+                       p.description AS name,
                        jp.quantity_used AS expected_quantity,
                        p.image_path, p.location,
                        MAX(ia.audited_at) AS last_audited
@@ -1459,14 +1602,16 @@ class Repository:
 
     def check_deprecation_progress(self, part_id: int) -> dict:
         """Check the current state of a part's deprecation."""
-        # Count open jobs that use this part
-        open_jobs = self.db.execute("""
-            SELECT COUNT(DISTINCT jp.job_id) AS cnt
+        # Count open jobs that have this part AND how many units
+        job_rows = self.db.execute("""
+            SELECT COUNT(DISTINCT jp.job_id) AS job_count,
+                   COALESCE(SUM(jp.quantity_used), 0) AS job_qty
             FROM job_parts jp
             JOIN jobs j ON jp.job_id = j.id
             WHERE jp.part_id = ? AND j.status IN ('active', 'on_hold')
         """, (part_id,))
-        open_job_count = open_jobs[0]["cnt"] if open_jobs else 0
+        open_job_count = job_rows[0]["job_count"] if job_rows else 0
+        job_quantity = job_rows[0]["job_qty"] if job_rows else 0
 
         # Count truck inventory
         truck_rows = self.db.execute("""
@@ -1482,44 +1627,46 @@ class Repository:
 
         return {
             "open_jobs": open_job_count,
+            "job_quantity": job_quantity,
             "truck_quantity": truck_qty,
             "warehouse_quantity": warehouse_qty,
             "deprecation_status": part.deprecation_status if part else None,
         }
 
     def advance_deprecation(self, part_id: int) -> str:
-        """Try to advance a part's deprecation to the next stage.
+        """Try to advance a part's deprecation as far as possible.
 
-        Returns the new status or the current one if conditions aren't met.
+        Loops through all stages until blocked or fully archived.
+        Returns the final status after all possible advances.
 
         Pipeline:
           pending → winding_down (all open jobs closed or part removed)
           winding_down → zero_stock (truck qty = 0)
           zero_stock → archived (warehouse qty = 0)
         """
-        progress = self.check_deprecation_progress(part_id)
-        current = progress["deprecation_status"]
+        # Loop so we advance through multiple stages in one call
+        # when conditions are already met (e.g. qty already 0)
+        for _ in range(4):  # max 4 iterations (safety bound)
+            progress = self.check_deprecation_progress(part_id)
+            current = progress["deprecation_status"]
 
-        if current == "pending":
-            if progress["open_jobs"] == 0:
+            if current == "pending" and progress["job_quantity"] == 0:
                 with self.db.get_connection() as conn:
                     conn.execute(
                         "UPDATE parts SET deprecation_status = 'winding_down' "
                         "WHERE id = ?", (part_id,)
                     )
-                return "winding_down"
+                continue  # Try next stage
 
-        elif current == "winding_down":
-            if progress["truck_quantity"] == 0:
+            elif current == "winding_down" and progress["truck_quantity"] == 0:
                 with self.db.get_connection() as conn:
                     conn.execute(
                         "UPDATE parts SET deprecation_status = 'zero_stock' "
                         "WHERE id = ?", (part_id,)
                     )
-                return "zero_stock"
+                continue  # Try next stage
 
-        elif current == "zero_stock":
-            if progress["warehouse_quantity"] == 0:
+            elif current == "zero_stock" and progress["warehouse_quantity"] == 0:
                 with self.db.get_connection() as conn:
                     conn.execute(
                         "UPDATE parts SET deprecation_status = 'archived' "
@@ -1527,7 +1674,28 @@ class Repository:
                     )
                 return "archived"
 
-        return current or ""
+            else:
+                # Can't advance further
+                break
+
+        # Re-check final status
+        final = self.check_deprecation_progress(part_id)
+        return final["deprecation_status"] or ""
+
+    def _try_advance_if_deprecating(self, part_id: int):
+        """Auto-advance deprecation if the part is in the pipeline.
+
+        Called automatically whenever part inventory changes
+        (update_part, receive_transfer, return_to_warehouse,
+        consume_from_truck) so the deprecation pipeline stays current.
+        """
+        try:
+            part = self.get_part_by_id(part_id)
+            if part and part.deprecation_status and \
+               part.deprecation_status != "archived":
+                self.advance_deprecation(part_id)
+        except Exception:
+            pass  # Never let deprecation logic break normal operations
 
     def cancel_deprecation(self, part_id: int):
         """Cancel an in-progress deprecation."""
@@ -1889,20 +2057,30 @@ class Repository:
 
     def create_labor_entry(self, entry: LaborEntry) -> int:
         with self.db.get_connection() as conn:
+            # Snapshot the job's current BRO at time of entry creation
+            bro = entry.bill_out_rate
+            if not bro and entry.job_id:
+                job_row = conn.execute(
+                    "SELECT bill_out_rate FROM jobs WHERE id = ?",
+                    (entry.job_id,),
+                ).fetchone()
+                if job_row:
+                    bro = job_row["bill_out_rate"] or ""
+
             cursor = conn.execute("""
                 INSERT INTO labor_entries
                     (user_id, job_id, start_time, end_time, hours,
                      description, sub_task_category, photos,
                      clock_in_lat, clock_in_lon, clock_out_lat, clock_out_lon,
-                     is_overtime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_overtime, bill_out_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.user_id, entry.job_id, entry.start_time,
                 entry.end_time, entry.hours, entry.description,
                 entry.sub_task_category, entry.photos,
                 entry.clock_in_lat, entry.clock_in_lon,
                 entry.clock_out_lat, entry.clock_out_lon,
-                entry.is_overtime,
+                entry.is_overtime, bro,
             ))
             return cursor.lastrowid
 
@@ -1950,11 +2128,12 @@ class Repository:
         conditions = ["le.job_id = ?"]
         params: list = [job_id]
         if date_from:
-            conditions.append("le.start_time >= ?")
-            params.append(date_from)
+            # Use DATE() so "2026-02-11" matches datetimes on that day
+            conditions.append("DATE(le.start_time) >= ?")
+            params.append(date_from[:10])  # Ensure date-only
         if date_to:
-            conditions.append("le.start_time <= ?")
-            params.append(date_to)
+            conditions.append("DATE(le.start_time) <= ?")
+            params.append(date_to[:10])
         where = " AND ".join(conditions)
         rows = self.db.execute(f"""
             SELECT le.*,
@@ -1975,11 +2154,11 @@ class Repository:
         conditions = ["le.user_id = ?"]
         params: list = [user_id]
         if date_from:
-            conditions.append("le.start_time >= ?")
-            params.append(date_from)
+            conditions.append("DATE(le.start_time) >= ?")
+            params.append(date_from[:10])
         if date_to:
-            conditions.append("le.start_time <= ?")
-            params.append(date_to)
+            conditions.append("DATE(le.start_time) <= ?")
+            params.append(date_to[:10])
         where = " AND ".join(conditions)
         rows = self.db.execute(f"""
             SELECT le.*,
@@ -2483,7 +2662,15 @@ class Repository:
             )
 
     def update_hat_permissions(self, hat_id: int, permissions: list[str]):
-        """Update the permissions for a hat."""
+        """Update the permissions for a hat.
+
+        Raises ValueError if the hat is locked (Admin, IT, Office).
+        """
+        from wired_part.utils.constants import LOCKED_HAT_IDS
+        if hat_id in LOCKED_HAT_IDS:
+            raise ValueError(
+                "Cannot modify permissions for a locked system hat."
+            )
         import json
         with self.db.get_connection() as conn:
             conn.execute(
@@ -2492,9 +2679,23 @@ class Repository:
             )
 
     def delete_hat(self, hat_id: int):
-        """Delete a hat (removes all user assignments too via CASCADE)."""
+        """Delete a hat (removes all user assignments too via CASCADE).
+
+        Raises ValueError if the hat is locked (Admin, IT, Office).
+        """
+        from wired_part.utils.constants import LOCKED_HAT_IDS
+        if hat_id in LOCKED_HAT_IDS:
+            raise ValueError("Cannot delete a locked system hat.")
         with self.db.get_connection() as conn:
             conn.execute("DELETE FROM hats WHERE id = ?", (hat_id,))
+
+    def rename_hat(self, hat_id: int, new_name: str):
+        """Rename a hat. Allowed even for locked hats."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE hats SET name = ? WHERE id = ?",
+                (new_name, hat_id),
+            )
 
     # ── User Hat Assignments ──────────────────────────────────────
 
@@ -2874,6 +3075,13 @@ class Repository:
         """
         count = 0
         with self.db.get_connection() as conn:
+            # Fetch the supplier_id from the PO (v12: supplier tracking)
+            po_row = conn.execute(
+                "SELECT supplier_id FROM purchase_orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            supplier_id = po_row["supplier_id"] if po_row else None
+
             for receipt in receipts:
                 item_id = receipt["order_item_id"]
                 qty = receipt["quantity_received"]
@@ -2890,14 +3098,15 @@ class Repository:
                     (qty, item_id),
                 )
 
-                # Create receive log entry
+                # Create receive log entry (v12: includes supplier_id)
                 conn.execute(
                     "INSERT INTO receive_log "
                     "(order_item_id, quantity_received, allocate_to, "
-                    "allocate_truck_id, allocate_job_id, received_by, notes) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "allocate_truck_id, allocate_job_id, received_by, "
+                    "supplier_id, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (item_id, qty, allocate_to, truck_id, job_id,
-                     received_by, notes),
+                     received_by, supplier_id, notes),
                 )
 
                 # Get the part_id for this order item
@@ -2917,12 +3126,14 @@ class Repository:
                         (qty, part_id),
                     )
                 elif allocate_to == "truck" and truck_id:
-                    # Create pending truck transfer
+                    # Create pending truck transfer (v12: with supplier tracking)
                     conn.execute(
                         "INSERT INTO truck_transfers "
                         "(truck_id, part_id, quantity, direction, status, "
-                        "created_by) VALUES (?, ?, ?, 'outbound', 'pending', ?)",
-                        (truck_id, part_id, qty, received_by),
+                        "created_by, source_order_id, supplier_id) "
+                        "VALUES (?, ?, ?, 'outbound', 'pending', ?, ?, ?)",
+                        (truck_id, part_id, qty, received_by,
+                         order_id, supplier_id),
                     )
                     # Also add to warehouse first (transfer will deduct)
                     conn.execute(
@@ -2937,25 +3148,42 @@ class Repository:
                         "WHERE id = ?",
                         (qty, part_id),
                     )
-                    # Create/update job_parts
+                    # v12: Enforce one-supplier-per-part-per-job rule
                     existing = conn.execute(
-                        "SELECT id, quantity_used FROM job_parts "
+                        "SELECT id, quantity_used, supplier_id "
+                        "FROM job_parts "
                         "WHERE job_id = ? AND part_id = ?",
                         (job_id, part_id),
                     ).fetchone()
+                    if (existing and existing["supplier_id"]
+                            and supplier_id
+                            and existing["supplier_id"] != supplier_id):
+                        raise ValueError(
+                            f"Supplier conflict: part {part_id} on job "
+                            f"{job_id} is already supplied by supplier "
+                            f"{existing['supplier_id']}; cannot receive "
+                            f"from supplier {supplier_id}. A part must "
+                            f"come from the same supplier for the "
+                            f"entire job."
+                        )
                     if existing:
                         conn.execute(
                             "UPDATE job_parts SET quantity_used = "
-                            "quantity_used + ? WHERE id = ?",
-                            (qty, existing["id"]),
+                            "quantity_used + ?, supplier_id = "
+                            "COALESCE(?, supplier_id), "
+                            "source_order_id = COALESCE(?, "
+                            "source_order_id) WHERE id = ?",
+                            (qty, supplier_id, order_id, existing["id"]),
                         )
                     else:
                         conn.execute(
                             "INSERT INTO job_parts "
                             "(job_id, part_id, quantity_used, "
-                            "unit_cost_at_use, notes) "
-                            "VALUES (?, ?, ?, ?, ?)",
+                            "unit_cost_at_use, supplier_id, "
+                            "source_order_id, notes) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (job_id, part_id, qty, unit_cost,
+                             supplier_id, order_id,
                              "Received from PO"),
                         )
 
@@ -3562,11 +3790,11 @@ class Repository:
                 SELECT poi1.part_id AS part_a,
                        poi2.part_id AS part_b,
                        COUNT(*) AS cnt
-                FROM po_items poi1
-                JOIN po_items poi2
-                    ON poi1.po_id = poi2.po_id
+                FROM purchase_order_items poi1
+                JOIN purchase_order_items poi2
+                    ON poi1.order_id = poi2.order_id
                     AND poi1.part_id < poi2.part_id
-                JOIN purchase_orders po ON poi1.po_id = po.id
+                JOIN purchase_orders po ON poi1.order_id = po.id
                 WHERE po.status IN ('received', 'closed')
                 GROUP BY poi1.part_id, poi2.part_id
                 HAVING cnt >= 2
@@ -3596,3 +3824,385 @@ class Repository:
                 FROM order_patterns
                 WHERE co_occurrence_count >= 2
             """)
+
+    # ── v12: Activity Log ──────────────────────────────────────────
+
+    def log_activity(
+        self, user_id: int | None, action: str, entity_type: str,
+        entity_id: int | None = None, entity_label: str = "",
+        details: str = "",
+    ) -> int:
+        """Record an activity log entry.
+
+        Args:
+            user_id: User who performed the action (None for system actions).
+            action: Verb — 'created', 'updated', 'deleted', 'received',
+                    'transferred', 'clocked_in', 'clocked_out', etc.
+            entity_type: 'job', 'part', 'order', 'labor', 'transfer',
+                         'return', 'user', 'truck', etc.
+            entity_id: Primary key of the affected entity.
+            entity_label: Human-readable label, e.g. "Job #4521 - Main St".
+            details: Optional JSON or text with extra context.
+
+        Returns:
+            The id of the created log entry.
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO activity_log "
+                "(user_id, action, entity_type, entity_id, "
+                "entity_label, details) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, action, entity_type, entity_id,
+                 entity_label, details),
+            )
+            return cursor.lastrowid
+
+    def get_activity_log(
+        self, entity_type: str | None = None,
+        entity_id: int | None = None,
+        user_id: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+    ) -> list:
+        """Retrieve activity log entries with optional filters.
+
+        Returns list of ActivityLogEntry objects.
+        """
+        from wired_part.database.models import ActivityLogEntry
+
+        clauses = []
+        params: list = []
+        if entity_type:
+            clauses.append("al.entity_type = ?")
+            params.append(entity_type)
+        if entity_id is not None:
+            clauses.append("al.entity_id = ?")
+            params.append(entity_id)
+        if user_id is not None:
+            clauses.append("al.user_id = ?")
+            params.append(user_id)
+        if date_from:
+            clauses.append("DATE(al.created_at) >= DATE(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("DATE(al.created_at) <= DATE(?)")
+            params.append(date_to)
+
+        where = " AND ".join(clauses) if clauses else "1=1"
+        params.append(limit)
+
+        rows = self.db.execute(f"""
+            SELECT al.*,
+                   COALESCE(u.display_name, '') AS user_name
+            FROM activity_log al
+            LEFT JOIN users u ON al.user_id = u.id
+            WHERE {where}
+            ORDER BY al.created_at DESC
+            LIMIT ?
+        """, tuple(params))
+        return [
+            ActivityLogEntry(**{
+                k: r[k] for k in r.keys()
+                if k in ActivityLogEntry.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_recent_activity(self, limit: int = 20) -> list:
+        """Shortcut: get the most recent activity log entries."""
+        return self.get_activity_log(limit=limit)
+
+    def get_entity_activity(
+        self, entity_type: str, entity_id: int, limit: int = 20
+    ) -> list:
+        """Get activity log for a specific entity (e.g. a job)."""
+        return self.get_activity_log(
+            entity_type=entity_type, entity_id=entity_id, limit=limit
+        )
+
+    # ── v12: Global Search ─────────────────────────────────────────
+
+    def search_all(self, query: str) -> dict:
+        """Search across all major entities.
+
+        Returns dict with keys: jobs, parts, users, orders, pages.
+        Each value is a list of dicts with id, label, sublabel, type.
+        """
+        if not query or not query.strip():
+            return {
+                "jobs": [], "parts": [], "users": [],
+                "orders": [], "pages": [],
+            }
+
+        q = f"%{query.strip()}%"
+
+        # Jobs
+        jobs = self.db.execute("""
+            SELECT id, job_number, name, customer, status
+            FROM jobs
+            WHERE job_number LIKE ? OR name LIKE ? OR customer LIKE ?
+            ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
+                     created_at DESC
+            LIMIT 10
+        """, (q, q, q))
+        job_results = [{
+            "id": r["id"],
+            "label": f"#{r['job_number']} - {r['name']}",
+            "sublabel": f"{r['customer'] or ''} [{r['status']}]",
+            "type": "job",
+        } for r in jobs]
+
+        # Parts
+        parts = self.db.execute("""
+            SELECT id, part_number, name, description, quantity
+            FROM parts
+            WHERE part_number LIKE ? OR name LIKE ?
+               OR description LIKE ? OR local_part_number LIKE ?
+            ORDER BY name, part_number
+            LIMIT 10
+        """, (q, q, q, q))
+        part_results = [{
+            "id": r["id"],
+            "label": r["name"] or r["description"] or r["part_number"],
+            "sublabel": f"PN: {r['part_number']} | Stock: {r['quantity']}",
+            "type": "part",
+        } for r in parts]
+
+        # Users
+        users = self.db.execute("""
+            SELECT id, username, display_name, is_active
+            FROM users
+            WHERE display_name LIKE ? OR username LIKE ?
+            ORDER BY is_active DESC, display_name
+            LIMIT 10
+        """, (q, q))
+        user_results = [{
+            "id": r["id"],
+            "label": r["display_name"],
+            "sublabel": f"@{r['username']}"
+                        + ("" if r["is_active"] else " [inactive]"),
+            "type": "user",
+        } for r in users]
+
+        # Orders
+        orders = self.db.execute("""
+            SELECT po.id, po.order_number, po.status,
+                   COALESCE(s.name, '') AS supplier_name
+            FROM purchase_orders po
+            LEFT JOIN suppliers s ON po.supplier_id = s.id
+            WHERE po.order_number LIKE ? OR s.name LIKE ?
+            ORDER BY po.created_at DESC
+            LIMIT 10
+        """, (q, q))
+        order_results = [{
+            "id": r["id"],
+            "label": r["order_number"],
+            "sublabel": f"{r['supplier_name']} [{r['status']}]",
+            "type": "order",
+        } for r in orders]
+
+        # Notebook pages
+        pages = self.db.execute("""
+            SELECT np.id, np.title, ns.name AS section_name,
+                   jn.job_id
+            FROM notebook_pages np
+            JOIN notebook_sections ns ON np.section_id = ns.id
+            JOIN job_notebooks jn ON ns.notebook_id = jn.id
+            WHERE np.title LIKE ? OR np.content LIKE ?
+            ORDER BY np.updated_at DESC
+            LIMIT 10
+        """, (q, q))
+        page_results = [{
+            "id": r["id"],
+            "label": r["title"],
+            "sublabel": f"Job #{r['job_id']} / {r['section_name']}",
+            "type": "page",
+        } for r in pages]
+
+        return {
+            "jobs": job_results,
+            "parts": part_results,
+            "users": user_results,
+            "orders": order_results,
+            "pages": page_results,
+        }
+
+    # ── v12: Supplier Chain Tracking ────────────────────────────────
+
+    def get_part_supplier_chain(self, part_id: int) -> list[dict]:
+        """Get the full supply chain history for a part.
+
+        Returns chronological list of movements: received, transferred,
+        consumed, returned — each with supplier info where available.
+        """
+        rows = self.db.execute("""
+            SELECT 'received' AS event,
+                   rl.received_at AS event_at,
+                   rl.quantity_received AS quantity,
+                   rl.allocate_to,
+                   po.order_number,
+                   s.name AS supplier_name,
+                   s.id AS supplier_id,
+                   COALESCE(u.display_name, '') AS user_name
+            FROM receive_log rl
+            JOIN purchase_order_items poi ON rl.order_item_id = poi.id
+            JOIN purchase_orders po ON poi.order_id = po.id
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON rl.received_by = u.id
+            WHERE poi.part_id = ?
+
+            UNION ALL
+
+            SELECT 'transferred' AS event,
+                   tt.created_at AS event_at,
+                   tt.quantity,
+                   tt.direction AS allocate_to,
+                   '' AS order_number,
+                   COALESCE(s.name, '') AS supplier_name,
+                   tt.supplier_id,
+                   COALESCE(u.display_name, '') AS user_name
+            FROM truck_transfers tt
+            LEFT JOIN suppliers s ON tt.supplier_id = s.id
+            LEFT JOIN users u ON tt.created_by = u.id
+            WHERE tt.part_id = ?
+
+            UNION ALL
+
+            SELECT 'consumed' AS event,
+                   cl.consumed_at AS event_at,
+                   cl.quantity,
+                   'job' AS allocate_to,
+                   '' AS order_number,
+                   COALESCE(s.name, '') AS supplier_name,
+                   cl.supplier_id,
+                   COALESCE(u.display_name, '') AS user_name
+            FROM consumption_log cl
+            LEFT JOIN suppliers s ON cl.supplier_id = s.id
+            LEFT JOIN users u ON cl.consumed_by = u.id
+            WHERE cl.part_id = ?
+
+            ORDER BY event_at DESC
+        """, (part_id, part_id, part_id))
+
+        return [dict(r) for r in rows]
+
+    def get_suggested_return_supplier(
+        self, part_id: int, job_id: int | None = None
+    ) -> int | None:
+        """Suggest which supplier to return a part to.
+
+        Looks at the supply chain to find the most recent supplier
+        that provided this part. If job_id is given, prioritizes
+        the supplier that sent parts to that specific job.
+        """
+        if job_id:
+            # First: check job_parts for direct supplier link
+            row = self.db.execute("""
+                SELECT supplier_id FROM job_parts
+                WHERE job_id = ? AND part_id = ? AND supplier_id IS NOT NULL
+                LIMIT 1
+            """, (job_id, part_id))
+            if row and row[0]["supplier_id"]:
+                return row[0]["supplier_id"]
+
+            # Second: check consumption log for this job
+            row = self.db.execute("""
+                SELECT supplier_id FROM consumption_log
+                WHERE job_id = ? AND part_id = ? AND supplier_id IS NOT NULL
+                ORDER BY consumed_at DESC LIMIT 1
+            """, (job_id, part_id))
+            if row and row[0]["supplier_id"]:
+                return row[0]["supplier_id"]
+
+        # Fallback: most recent supplier for this part from any source
+        row = self.db.execute("""
+            SELECT rl.supplier_id
+            FROM receive_log rl
+            JOIN purchase_order_items poi ON rl.order_item_id = poi.id
+            WHERE poi.part_id = ? AND rl.supplier_id IS NOT NULL
+            ORDER BY rl.received_at DESC, rl.id DESC LIMIT 1
+        """, (part_id,))
+        if row and row[0]["supplier_id"]:
+            return row[0]["supplier_id"]
+
+        return None
+
+    # ── v12: Job Updates (Team Communication) ───────────────────────
+
+    def create_job_update(
+        self, job_id: int, user_id: int, message: str,
+        update_type: str = "comment", photos: str = "[]",
+    ) -> int:
+        """Post a comment or update on a job."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO job_updates "
+                "(job_id, user_id, message, update_type, photos) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (job_id, user_id, message, update_type, photos),
+            )
+            return cursor.lastrowid
+
+    def get_job_updates(
+        self, job_id: int, limit: int = 50
+    ) -> list:
+        """Get updates/comments for a job, pinned first then by date."""
+        from wired_part.database.models import JobUpdate
+
+        rows = self.db.execute("""
+            SELECT ju.*,
+                   COALESCE(u.display_name, '') AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            LEFT JOIN jobs j ON ju.job_id = j.id
+            WHERE ju.job_id = ?
+            ORDER BY ju.is_pinned DESC, ju.created_at DESC, ju.id DESC
+            LIMIT ?
+        """, (job_id, limit))
+        return [
+            JobUpdate(**{
+                k: r[k] for k in r.keys()
+                if k in JobUpdate.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_latest_updates_across_jobs(self, limit: int = 20) -> list:
+        """Get the most recent job updates across all jobs (for dashboard)."""
+        from wired_part.database.models import JobUpdate
+
+        rows = self.db.execute("""
+            SELECT ju.*,
+                   COALESCE(u.display_name, '') AS user_name,
+                   j.job_number, j.name AS job_name
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            LEFT JOIN jobs j ON ju.job_id = j.id
+            ORDER BY ju.created_at DESC, ju.id DESC
+            LIMIT ?
+        """, (limit,))
+        return [
+            JobUpdate(**{
+                k: r[k] for k in r.keys()
+                if k in JobUpdate.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def pin_job_update(self, update_id: int, pinned: bool = True):
+        """Pin or unpin a job update."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE job_updates SET is_pinned = ? WHERE id = ?",
+                (1 if pinned else 0, update_id),
+            )
+
+    def delete_job_update(self, update_id: int):
+        """Delete a job update."""
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM job_updates WHERE id = ?", (update_id,)
+            )

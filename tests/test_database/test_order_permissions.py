@@ -35,7 +35,7 @@ class TestOrderPermissions:
     """Test that order permissions are correctly assigned to hats."""
 
     def test_admin_has_all_order_permissions(self, repo):
-        user = _create_user_with_hat(repo, "admin1", "Admin")
+        user = _create_user_with_hat(repo, "admin1", "Admin / CEO / Owner")
         perms = repo.get_user_permissions(user.id)
         assert "tab_orders" in perms
         assert "orders_create" in perms
@@ -46,7 +46,7 @@ class TestOrderPermissions:
         assert "orders_history" in perms
 
     def test_office_has_all_order_permissions(self, repo):
-        user = _create_user_with_hat(repo, "office1", "Office")
+        user = _create_user_with_hat(repo, "office1", "Office / HR")
         perms = repo.get_user_permissions(user.id)
         assert "tab_orders" in perms
         assert "orders_create" in perms

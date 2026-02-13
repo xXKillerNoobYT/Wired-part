@@ -139,6 +139,7 @@ class Job:
     status: str = "active"
     priority: int = 3  # 1=highest, 5=lowest
     notes: str = ""
+    bill_out_rate: str = ""  # BRO category code (e.g. 'C', 'T&M', 'SERVICE')
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -153,11 +154,14 @@ class JobPart:
     unit_cost_at_use: float = 0.0
     consumed_from_truck_id: Optional[int] = None
     consumed_by: Optional[int] = None
+    supplier_id: Optional[int] = None       # v12: supplier origin tracking
+    source_order_id: Optional[int] = None   # v12: PO that supplied this part
     notes: str = ""
     assigned_at: Optional[datetime] = None
     # Joined fields
     part_number: str = field(default="", repr=False)
     part_description: str = field(default="", repr=False)
+    supplier_name: str = field(default="", repr=False)
 
     @property
     def total_cost(self) -> float:
@@ -218,6 +222,8 @@ class TruckTransfer:
     notes: str = ""
     parts_list_id: Optional[int] = None
     job_id: Optional[int] = None
+    source_order_id: Optional[int] = None   # v12: PO that supplied this part
+    supplier_id: Optional[int] = None       # v12: supplier origin tracking
     created_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     # Joined fields
@@ -226,6 +232,7 @@ class TruckTransfer:
     truck_number: str = field(default="", repr=False)
     created_by_name: str = field(default="", repr=False)
     received_by_name: str = field(default="", repr=False)
+    supplier_name: str = field(default="", repr=False)
 
 
 @dataclass
@@ -264,6 +271,8 @@ class ConsumptionLog:
     quantity: int = 0
     unit_cost_at_use: float = 0.0
     consumed_by: Optional[int] = None
+    supplier_id: Optional[int] = None       # v12: supplier origin tracking
+    source_order_id: Optional[int] = None   # v12: PO that supplied this part
     notes: str = ""
     consumed_at: Optional[datetime] = None
     # Joined fields
@@ -272,6 +281,7 @@ class ConsumptionLog:
     truck_number: str = field(default="", repr=False)
     job_number: str = field(default="", repr=False)
     consumed_by_name: str = field(default="", repr=False)
+    supplier_name: str = field(default="", repr=False)
 
 
 @dataclass
@@ -290,6 +300,7 @@ class LaborEntry:
     clock_out_lat: Optional[float] = None
     clock_out_lon: Optional[float] = None
     is_overtime: int = 0
+    bill_out_rate: str = ""  # BRO snapshot from job at time of entry
     created_at: Optional[datetime] = None
     # Joined fields
     user_name: str = field(default="", repr=False)
@@ -544,6 +555,7 @@ class ReceiveLogEntry:
     allocate_truck_id: Optional[int] = None
     allocate_job_id: Optional[int] = None
     received_by: Optional[int] = None
+    supplier_id: Optional[int] = None       # v12: denormalized supplier reference
     notes: str = ""
     received_at: Optional[datetime] = None
     # Joined fields
@@ -552,6 +564,7 @@ class ReceiveLogEntry:
     truck_number: str = field(default="", repr=False)
     job_number: str = field(default="", repr=False)
     received_by_name: str = field(default="", repr=False)
+    supplier_name: str = field(default="", repr=False)
 
 
 @dataclass
@@ -637,3 +650,46 @@ class InventoryAudit:
     part_number: str = field(default="", repr=False)
     part_name: str = field(default="", repr=False)
     audited_by_name: str = field(default="", repr=False)
+
+
+# ── v12 models ──────────────────────────────────────────────────
+
+
+@dataclass
+class ActivityLogEntry:
+    """Audit trail entry tracking all major actions in the system."""
+    id: Optional[int] = None
+    user_id: Optional[int] = None
+    action: str = ""            # 'created', 'updated', 'deleted', 'received', etc.
+    entity_type: str = ""       # 'job', 'part', 'order', 'labor', 'transfer', etc.
+    entity_id: Optional[int] = None
+    entity_label: str = ""      # Human-readable, e.g. "Job #4521 - Main St"
+    details: str = ""           # JSON or text with additional context
+    created_at: Optional[datetime] = None
+    # Joined fields
+    user_name: str = field(default="", repr=False)
+
+
+@dataclass
+class JobUpdate:
+    """Team communication entry for a job."""
+    id: Optional[int] = None
+    job_id: int = 0
+    user_id: int = 0
+    message: str = ""
+    update_type: str = "comment"    # comment, status_change, assignment, milestone
+    is_pinned: int = 0
+    photos: str = "[]"
+    created_at: Optional[datetime] = None
+    # Joined fields
+    user_name: str = field(default="", repr=False)
+    job_number: str = field(default="", repr=False)
+    job_name: str = field(default="", repr=False)
+
+    @property
+    def photo_list(self) -> list[str]:
+        import json
+        try:
+            return json.loads(self.photos) if self.photos else []
+        except (json.JSONDecodeError, TypeError):
+            return []

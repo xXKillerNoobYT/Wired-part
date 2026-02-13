@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from wired_part.database.models import Part
-from wired_part.io.csv_handler import export_parts_csv, import_parts_csv
+from wired_part.database.models import Job, Part
+from wired_part.io.csv_handler import (
+    export_jobs_csv, export_parts_csv, import_parts_csv,
+)
 
 
 class TestCSVExport:
@@ -100,3 +102,40 @@ class TestCSVImport:
         results = import_parts_csv(repo, csv_file)
         assert results["skipped"] == 2
         assert len(results["errors"]) >= 2
+
+
+class TestCSVExportJobs:
+    """Test exporting jobs to CSV."""
+
+    def test_export_jobs(self, repo, tmp_path):
+        repo.create_job(Job(
+            job_number="JEXP-001",
+            name="Export Job",
+            customer="Client A",
+            address="123 Main St",
+            status="active",
+        ))
+        repo.create_job(Job(
+            job_number="JEXP-002",
+            name="Another Job",
+            status="completed",
+        ))
+
+        outfile = tmp_path / "jobs_export.csv"
+        count = export_jobs_csv(repo, outfile)
+        assert count >= 2
+        assert outfile.exists()
+
+        with open(outfile) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        nums = {r["job_number"] for r in rows}
+        assert "JEXP-001" in nums
+        assert "JEXP-002" in nums
+
+    def test_export_jobs_empty(self, repo, tmp_path):
+        """Export with no jobs produces header-only CSV."""
+        outfile = tmp_path / "empty_jobs.csv"
+        count = export_jobs_csv(repo, outfile)
+        assert count == 0
+        assert outfile.exists()

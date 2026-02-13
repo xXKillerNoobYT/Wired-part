@@ -472,20 +472,28 @@ class NewOrdersPage(QWidget):
             return
 
         # Group by supplier for potential splitting
-        from wired_part.database.models import PurchaseOrder, POItem
+        from wired_part.database.models import PurchaseOrder, PurchaseOrderItem
         supplier_groups: dict[int | None, list[dict]] = {}
         for item in self._order_items:
-            sid = item["part"].supplier_id if hasattr(
-                item["part"], "supplier_id"
-            ) else None
+            # Look up the first linked supplier for this part
+            part_suppliers = self.repo.get_part_suppliers(item["part"].id)
+            sid = part_suppliers[0].supplier_id if part_suppliers else None
             supplier_groups.setdefault(sid, []).append(item)
 
         # Create one PO per supplier group
         created_pos = []
         for supplier_id, items in supplier_groups.items():
+            if not supplier_id:
+                # Skip parts with no linked supplier — warn the user
+                part_names = [i["part"].display_name for i in items]
+                QMessageBox.warning(
+                    self, "No Supplier",
+                    f"The following parts have no linked supplier "
+                    f"and were skipped:\n• " + "\n• ".join(part_names),
+                )
+                continue
             try:
                 po = PurchaseOrder(
-                    job_id=job_id,
                     supplier_id=supplier_id,
                     status="draft",
                     created_by=self.current_user.id if self.current_user else None,
@@ -493,13 +501,13 @@ class NewOrdersPage(QWidget):
                 po_id = self.repo.create_purchase_order(po)
 
                 for item in items:
-                    poi = POItem(
-                        po_id=po_id,
+                    poi = PurchaseOrderItem(
+                        order_id=po_id,
                         part_id=item["part"].id,
-                        quantity=item["qty"],
+                        quantity_ordered=item["qty"],
                         unit_cost=item["part"].unit_cost,
                     )
-                    self.repo.create_po_item(poi)
+                    self.repo.add_order_item(poi)
 
                 created_pos.append(po_id)
             except Exception as e:
@@ -508,6 +516,14 @@ class NewOrdersPage(QWidget):
                     f"Failed to create PO: {e}",
                 )
                 return
+
+        if not created_pos:
+            QMessageBox.warning(
+                self, "No Orders Created",
+                "No purchase orders were created. Make sure parts "
+                "have linked suppliers.",
+            )
+            return
 
         QMessageBox.information(
             self, "Orders Created",

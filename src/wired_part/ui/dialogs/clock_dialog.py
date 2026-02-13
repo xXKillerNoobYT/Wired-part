@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -53,10 +54,18 @@ class _LocationWorker(QThread):
                 "$w.Stop()"
             )
             result = subprocess.run(
-                ["powershell", "-Command", ps_script],
+                ["powershell", "-NoProfile", "-Command", ps_script],
                 capture_output=True, text=True, timeout=15,
             )
-            output = result.stdout.strip()
+            # Strip ANSI / VS Code terminal escape sequences that
+            # can leak into subprocess stdout (e.g. \x1b]633;…\x07)
+            raw = result.stdout
+            output = re.sub(
+                r"\x1b\].*?\x07"   # OSC sequences (VS Code terminal)
+                r"|\x1b\[[0-9;]*[A-Za-z]"  # CSI sequences
+                r"|\x1b[^[\]].?",  # Other ESC sequences
+                "", raw,
+            ).strip()
             if output and output != "FAILED" and "," in output:
                 parts = output.split(",")
                 lat = float(parts[0])
@@ -206,6 +215,7 @@ class ClockInDialog(QDialog):
         self.repo = repo
         self.user_id = user_id
         self.result_entry_id = None
+        self._loc_worker = None
         self.setWindowTitle("Clock In")
         self.setMinimumWidth(440)
         self._setup_ui()
@@ -215,6 +225,20 @@ class ClockInDialog(QDialog):
                 self.job_selector.setCurrentIndex(idx)
         # Auto-detect GPS on open
         self._auto_detect_location()
+
+    def closeEvent(self, event):
+        """Ensure GPS thread is stopped before closing."""
+        if self._loc_worker and self._loc_worker.isRunning():
+            self._loc_worker.quit()
+            self._loc_worker.wait(2000)
+        super().closeEvent(event)
+
+    def reject(self):
+        """Ensure GPS thread is stopped on cancel."""
+        if self._loc_worker and self._loc_worker.isRunning():
+            self._loc_worker.quit()
+            self._loc_worker.wait(2000)
+        super().reject()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -239,9 +263,9 @@ class ClockInDialog(QDialog):
 
         layout.addLayout(form)
 
-        # Photo section (required)
+        # Photo section (optional at clock-in — required at clock-out)
         self.photos = _PhotoSection(
-            "Photos (required)", required=True, parent=self
+            "Photos (optional)", required=False, parent=self
         )
         layout.addWidget(self.photos)
 
@@ -362,13 +386,7 @@ class ClockInDialog(QDialog):
             )
             return
 
-        # Check photo requirement
-        if not self.photos.has_minimum():
-            QMessageBox.warning(
-                self, "Photo Required",
-                "Please attach at least one photo before clocking in.",
-            )
-            return
+        # Photos are optional at clock-in (required at clock-out)
 
         # Check for active clock-in
         active = self.repo.get_active_clock_in(self.user_id)
@@ -422,6 +440,7 @@ class ClockOutDialog(QDialog):
         super().__init__(parent)
         self.repo = repo
         self.entry_id = entry_id
+        self._loc_worker = None
         self.setWindowTitle("Clock Out")
         self.setMinimumWidth(440)
 
@@ -430,6 +449,20 @@ class ClockOutDialog(QDialog):
         self._setup_ui()
         # Auto-detect GPS on open
         self._auto_detect_location()
+
+    def closeEvent(self, event):
+        """Ensure GPS thread is stopped before closing."""
+        if self._loc_worker and self._loc_worker.isRunning():
+            self._loc_worker.quit()
+            self._loc_worker.wait(2000)
+        super().closeEvent(event)
+
+    def reject(self):
+        """Ensure GPS thread is stopped on cancel."""
+        if self._loc_worker and self._loc_worker.isRunning():
+            self._loc_worker.quit()
+            self._loc_worker.wait(2000)
+        super().reject()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

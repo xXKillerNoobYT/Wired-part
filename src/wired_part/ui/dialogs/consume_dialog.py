@@ -36,16 +36,22 @@ class ConsumeDialog(QDialog):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # Truck selector
+        # Truck selector — only trucks assigned to users on this job
         truck_layout = QHBoxLayout()
         truck_layout.addWidget(QLabel("Select Truck:"))
         self.truck_combo = QComboBox()
         self.truck_combo.setMinimumHeight(30)
 
-        trucks = self.repo.get_all_trucks(active_only=True)
-        for truck in trucks:
-            label = f"{truck.truck_number} — {truck.name}"
-            self.truck_combo.addItem(label, truck.id)
+        trucks = self.repo.get_trucks_for_job(self.job_id)
+        if not trucks:
+            self.truck_combo.addItem("No trucks available for this job")
+            self.truck_combo.setEnabled(False)
+        else:
+            for truck in trucks:
+                owner = (f" [{truck.assigned_user_name}]"
+                         if truck.assigned_user_name else "")
+                label = f"{truck.truck_number} — {truck.name}{owner}"
+                self.truck_combo.addItem(label, truck.id)
         self.truck_combo.currentIndexChanged.connect(self._load_inventory)
         truck_layout.addWidget(self.truck_combo, 1)
         layout.addLayout(truck_layout)

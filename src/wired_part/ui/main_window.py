@@ -60,14 +60,15 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         """Build the tabbed central layout with grouped sections.
 
-        Tab layout (7 tabs):
+        Tab layout (8 tabs):
             0: Dashboard
             1: Parts Catalog          (standalone)
             2: Job Tracking           (sub-tabs: Jobs, Trucks, Labor)
             3: Warehouse & Trucks     (sub-tabs: Warehouse, Trucks Inv, Jobs Inv)
             4: Orders & Returns       (sub-tabs: Pending, Incoming, Returns, History)
-            5: Agent
-            6: Settings
+            5: Office                 (sub-tabs: Billing, Timesheet, Labor Cost)
+            6: Agent
+            7: Settings
         """
         from wired_part.ui.pages.dashboard_page import DashboardPage
         from wired_part.ui.pages.inventory_page import InventoryPage
@@ -85,6 +86,7 @@ class MainWindow(QMainWindow):
         from wired_part.ui.pages.returns_page import ReturnsPage
         from wired_part.ui.pages.order_history_page import OrderHistoryPage
         from wired_part.ui.pages.agent_page import AgentPage
+        from wired_part.ui.pages.office_page import OfficePage
         from wired_part.ui.pages.settings_page import SettingsPage
 
         # Central container with toolbar + tabs
@@ -233,11 +235,15 @@ class MainWindow(QMainWindow):
         orders_layout.addWidget(self.orders_tabs)
         self.tabs.addTab(orders_container, "Orders & Returns")
 
-        # ── Tab 5: Agent ─────────────────────────────────────────
+        # ── Tab 5: Office ──────────────────────────────────────────
+        self.office_page = OfficePage(self.repo, self.current_user)
+        self.tabs.addTab(self.office_page, "Office")
+
+        # ── Tab 6: Agent ─────────────────────────────────────────
         self.agent_page = AgentPage(self.repo)
         self.tabs.addTab(self.agent_page, "Agent")
 
-        # ── Tab 6: Settings ──────────────────────────────────────
+        # ── Tab 7: Settings ──────────────────────────────────────
         self.settings_page = SettingsPage(self.repo, self.current_user)
         self.tabs.addTab(self.settings_page, "Settings")
 
@@ -314,11 +320,14 @@ class MainWindow(QMainWindow):
         # Tab 4 = Orders & Returns
         self.tabs.setTabVisible(4, "tab_orders" in perms)
 
-        # Tab 5 = Agent
-        self.tabs.setTabVisible(5, "tab_agent" in perms)
+        # Tab 5 = Office
+        self.tabs.setTabVisible(5, "tab_office" in perms)
 
-        # Tab 6 = Settings
-        self.tabs.setTabVisible(6, "tab_settings" in perms)
+        # Tab 6 = Agent
+        self.tabs.setTabVisible(6, "tab_agent" in perms)
+
+        # Tab 7 = Settings
+        self.tabs.setTabVisible(7, "tab_settings" in perms)
 
         # Update incomplete badge on Parts Catalog tab
         self._update_tab_badges()
@@ -399,6 +408,7 @@ class MainWindow(QMainWindow):
         for sub_tabs in (
             self.parts_catalog_page.sub_tabs,
             self.jobs_tabs, self.warehouse_tabs, self.orders_tabs,
+            self.office_page.sub_tabs,
         ):
             if sub_tabs.parent() == widget:
                 sub_widget = sub_tabs.currentWidget()
@@ -464,9 +474,11 @@ class MainWindow(QMainWindow):
             "parts_catalog": 1,
             "job_tracking": 2,
             "warehouse": 3,
+            "trucks": 3,
             "orders": 4,
-            "agent": 5,
-            "settings": 6,
+            "office": 5,
+            "agent": 6,
+            "settings": 7,
         }
         tab_idx = tab_map.get(notif.target_tab)
         if tab_idx is not None:

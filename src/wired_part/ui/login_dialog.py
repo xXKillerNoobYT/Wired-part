@@ -445,8 +445,8 @@ class FirstRunDialog(QDialog):
         try:
             user_id = self.repo.create_user(user)
             user.id = user_id
-            # Auto-assign Admin hat to the first user
-            admin_hat = self.repo.get_hat_by_name("Admin")
+            # Auto-assign Admin hat (id=1) to the first user
+            admin_hat = self.repo.get_hat_by_id(1)
             if admin_hat:
                 self.repo.assign_hat(user_id, admin_hat.id)
             _save_last_login_username(username)

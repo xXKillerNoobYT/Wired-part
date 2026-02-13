@@ -288,7 +288,7 @@ class TruckInventoryManagerPage(QWidget):
         qty, ok = QInputDialog.getInt(
             self, "Set Quantity",
             f"Set current quantity for {item.part_number}:",
-            value=item.quantity, min=0, max=99999,
+            item.quantity, 0, 99999,
         )
         if ok:
             self.repo.set_truck_inventory_quantity(truck_id, item.part_id, qty)

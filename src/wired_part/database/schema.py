@@ -1,6 +1,6 @@
 """Database schema definition, initialization, and migrations."""
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 # Each statement is a separate string to avoid executescript issues
 _SCHEMA_STATEMENTS = [
@@ -153,6 +153,7 @@ _SCHEMA_STATEMENTS = [
         priority INTEGER NOT NULL DEFAULT 3
             CHECK (priority BETWEEN 1 AND 5),
         notes TEXT,
+        bill_out_rate TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         completed_at TIMESTAMP
@@ -180,12 +181,16 @@ _SCHEMA_STATEMENTS = [
         unit_cost_at_use REAL,
         consumed_from_truck_id INTEGER,
         consumed_by INTEGER,
+        supplier_id INTEGER,
+        source_order_id INTEGER,
         notes TEXT,
         assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         FOREIGN KEY (consumed_from_truck_id) REFERENCES trucks(id) ON DELETE SET NULL,
         FOREIGN KEY (consumed_by) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+        FOREIGN KEY (source_order_id) REFERENCES purchase_orders(id) ON DELETE SET NULL,
         UNIQUE(job_id, part_id)
     )""",
 
@@ -216,6 +221,8 @@ _SCHEMA_STATEMENTS = [
         notes TEXT,
         parts_list_id INTEGER,
         job_id INTEGER,
+        source_order_id INTEGER,
+        supplier_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         received_at TIMESTAMP,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
@@ -223,7 +230,9 @@ _SCHEMA_STATEMENTS = [
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
         FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL,
         FOREIGN KEY (parts_list_id) REFERENCES parts_lists(id) ON DELETE SET NULL,
-        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+        FOREIGN KEY (source_order_id) REFERENCES purchase_orders(id) ON DELETE SET NULL,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL
     )""",
 
     # Job assignments: many-to-many users↔jobs
@@ -263,12 +272,16 @@ _SCHEMA_STATEMENTS = [
         quantity INTEGER NOT NULL CHECK (quantity > 0),
         unit_cost_at_use REAL DEFAULT 0.0,
         consumed_by INTEGER,
+        supplier_id INTEGER,
+        source_order_id INTEGER,
         notes TEXT,
         consumed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
-        FOREIGN KEY (consumed_by) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (consumed_by) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+        FOREIGN KEY (source_order_id) REFERENCES purchase_orders(id) ON DELETE SET NULL
     )""",
 
     # Labor entries (time tracking)
@@ -288,6 +301,7 @@ _SCHEMA_STATEMENTS = [
         clock_out_lon REAL,
         rate_per_hour REAL DEFAULT 0.0,
         is_overtime INTEGER NOT NULL DEFAULT 0,
+        bill_out_rate TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -407,13 +421,15 @@ _SCHEMA_STATEMENTS = [
         allocate_truck_id INTEGER,
         allocate_job_id INTEGER,
         received_by INTEGER,
+        supplier_id INTEGER,
         notes TEXT,
         received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (order_item_id)
             REFERENCES purchase_order_items(id) ON DELETE CASCADE,
         FOREIGN KEY (allocate_truck_id) REFERENCES trucks(id) ON DELETE SET NULL,
         FOREIGN KEY (allocate_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
-        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL
     )""",
 
     # Return authorizations
@@ -520,6 +536,35 @@ _SCHEMA_STATEMENTS = [
         UNIQUE(part_id_a, part_id_b)
     )""",
 
+    # Activity log: audit trail for all major actions (v12)
+    """CREATE TABLE IF NOT EXISTS activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        action TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER,
+        entity_label TEXT DEFAULT '',
+        details TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    )""",
+
+    # Job updates: team communication per job (v12)
+    """CREATE TABLE IF NOT EXISTS job_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        update_type TEXT NOT NULL DEFAULT 'comment'
+            CHECK (update_type IN ('comment', 'status_change',
+                                   'assignment', 'milestone')),
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        photos TEXT DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""",
+
     # Schema version tracking
     """CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER PRIMARY KEY,
@@ -587,6 +632,23 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_part_suppliers_part ON part_suppliers(part_id)",
     "CREATE INDEX IF NOT EXISTS idx_part_suppliers_supplier ON part_suppliers(supplier_id)",
     "CREATE INDEX IF NOT EXISTS idx_part_variants_part ON part_variants(part_id)",
+
+    # v12 indexes: supplier tracking
+    "CREATE INDEX IF NOT EXISTS idx_transfers_supplier ON truck_transfers(supplier_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_source_order ON truck_transfers(source_order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_consumption_supplier ON consumption_log(supplier_id)",
+    "CREATE INDEX IF NOT EXISTS idx_consumption_source_order ON consumption_log(source_order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_parts_supplier ON job_parts(supplier_id)",
+    "CREATE INDEX IF NOT EXISTS idx_receive_log_supplier ON receive_log(supplier_id)",
+    # v12 indexes: activity log
+    "CREATE INDEX IF NOT EXISTS idx_activity_user ON activity_log(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_activity_entity ON activity_log(entity_type, entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_log(action)",
+    "CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at)",
+    # v12 indexes: job updates
+    "CREATE INDEX IF NOT EXISTS idx_job_updates_job ON job_updates(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_updates_user ON job_updates(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_updates_created ON job_updates(created_at)",
 
     # v10 indexes
     "CREATE INDEX IF NOT EXISTS idx_parts_deprecation ON parts(deprecation_status)",
@@ -908,6 +970,7 @@ _MIGRATION_V4_STATEMENTS = [
         clock_out_lon REAL,
         rate_per_hour REAL DEFAULT 0.0,
         is_overtime INTEGER NOT NULL DEFAULT 0,
+        bill_out_rate TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -1043,26 +1106,39 @@ def _seed_default_hats(conn):
         )
 
 
+def _rename_legacy_hats(conn):
+    """Rename legacy system hats to their new display names (idempotent)."""
+    from wired_part.utils.constants import _HAT_RENAME_MAP
+    for old_name, new_name in _HAT_RENAME_MAP.items():
+        conn.execute(
+            "UPDATE hats SET name = ? WHERE name = ? AND is_system = 1",
+            (new_name, old_name),
+        )
+
+
 def _refresh_system_hat_permissions(conn):
     """Ensure all system hats have the latest default permissions.
 
     Merges any new permission keys from DEFAULT_HAT_PERMISSIONS into
     the stored hat JSON.  This keeps migrated databases in sync when
     new features add new permission keys.
+
+    Matches hats by is_system=1 and uses a name→defaults lookup.
     """
     import json
-    from wired_part.utils.constants import HAT_NAMES, DEFAULT_HAT_PERMISSIONS
+    from wired_part.utils.constants import DEFAULT_HAT_PERMISSIONS
 
-    for hat_name in HAT_NAMES:
-        row = conn.execute(
-            "SELECT id, permissions FROM hats WHERE name = ? AND is_system = 1",
-            (hat_name,),
-        ).fetchone()
-        if not row:
+    rows = conn.execute(
+        "SELECT id, name, permissions FROM hats WHERE is_system = 1"
+    ).fetchall()
+
+    for row in rows:
+        hat_name = row["name"]
+        defaults = DEFAULT_HAT_PERMISSIONS.get(hat_name, [])
+        if not defaults:
             continue
 
         current = json.loads(row["permissions"]) if row["permissions"] else []
-        defaults = DEFAULT_HAT_PERMISSIONS.get(hat_name, [])
         merged = list(current)
         updated = False
         for perm in defaults:
@@ -1078,8 +1154,9 @@ def _refresh_system_hat_permissions(conn):
 
 def _assign_hats_to_existing_admins(conn):
     """Auto-assign Admin hat to existing users with role='admin'."""
+    # Find admin hat by id=1 (reliable) or by current name (fallback)
     admin_hat = conn.execute(
-        "SELECT id FROM hats WHERE name = 'Admin'"
+        "SELECT id FROM hats WHERE id = 1"
     ).fetchone()
     worker_hat = conn.execute(
         "SELECT id FROM hats WHERE name = 'Worker'"
@@ -1635,10 +1712,179 @@ def _migrate_v9_to_v10(conn):
         conn.execute(stmt)
 
 
+def _migrate_v10_to_v11(conn):
+    """v10 → v11: Bill out rate on jobs + BRO snapshot on labor entries."""
+    stmts = [
+        # Jobs: bill out rate — text category code (e.g. 'C', 'T&M', 'SERVICE')
+        "ALTER TABLE jobs ADD COLUMN bill_out_rate TEXT NOT NULL DEFAULT ''",
+
+        # Labor entries: BRO snapshot — captures the job's BRO at time of entry
+        "ALTER TABLE labor_entries ADD COLUMN bill_out_rate TEXT NOT NULL DEFAULT ''",
+
+        # Update schema version
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (11)",
+    ]
+    for stmt in stmts:
+        conn.execute(stmt)
+
+    # Backfill existing labor entries with their job's current BRO
+    conn.execute("""
+        UPDATE labor_entries SET bill_out_rate = (
+            SELECT COALESCE(j.bill_out_rate, '')
+            FROM jobs j WHERE j.id = labor_entries.job_id
+        ) WHERE bill_out_rate = ''
+    """)
+
+
+def _migrate_v11_to_v12(conn):
+    """v11 → v12: Supply chain supplier tracking, activity log, job updates."""
+    stmts = [
+        # ── Supplier tracking: new columns on existing tables ──
+        "ALTER TABLE truck_transfers ADD COLUMN source_order_id INTEGER",
+        "ALTER TABLE truck_transfers ADD COLUMN supplier_id INTEGER",
+        "ALTER TABLE consumption_log ADD COLUMN supplier_id INTEGER",
+        "ALTER TABLE consumption_log ADD COLUMN source_order_id INTEGER",
+        "ALTER TABLE job_parts ADD COLUMN supplier_id INTEGER",
+        "ALTER TABLE job_parts ADD COLUMN source_order_id INTEGER",
+        "ALTER TABLE receive_log ADD COLUMN supplier_id INTEGER",
+
+        # ── New indexes for supplier tracking ──
+        "CREATE INDEX IF NOT EXISTS idx_transfers_supplier ON truck_transfers(supplier_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transfers_source_order ON truck_transfers(source_order_id)",
+        "CREATE INDEX IF NOT EXISTS idx_consumption_supplier ON consumption_log(supplier_id)",
+        "CREATE INDEX IF NOT EXISTS idx_consumption_source_order ON consumption_log(source_order_id)",
+        "CREATE INDEX IF NOT EXISTS idx_job_parts_supplier ON job_parts(supplier_id)",
+        "CREATE INDEX IF NOT EXISTS idx_receive_log_supplier ON receive_log(supplier_id)",
+
+        # ── Activity log table ──
+        """CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,
+            entity_label TEXT DEFAULT '',
+            details TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_activity_user ON activity_log(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_entity ON activity_log(entity_type, entity_id)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_log(action)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at)",
+
+        # ── Job updates table (team communication) ──
+        """CREATE TABLE IF NOT EXISTS job_updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            update_type TEXT NOT NULL DEFAULT 'comment'
+                CHECK (update_type IN ('comment', 'status_change',
+                                       'assignment', 'milestone')),
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            photos TEXT DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_job_updates_job ON job_updates(job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_job_updates_user ON job_updates(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_job_updates_created ON job_updates(created_at)",
+
+        # ── Backfill supplier_id on receive_log from PO chain ──
+        """UPDATE receive_log SET supplier_id = (
+            SELECT po.supplier_id
+            FROM purchase_order_items poi
+            JOIN purchase_orders po ON poi.order_id = po.id
+            WHERE poi.id = receive_log.order_item_id
+        ) WHERE supplier_id IS NULL""",
+
+        # Update schema version
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (12)",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass  # Column/table may already exist
+
+
+def _ensure_required_columns(conn):
+    """Safety net: ensure all required columns exist on every table.
+
+    Some ALTER TABLE statements in earlier migrations may have silently
+    failed (wrapped in try/except).  This function checks the actual
+    table schemas and adds any missing columns.
+    """
+    # (table, column, definition) — added via ALTER if missing
+    _REQUIRED_COLUMNS = [
+        # Parts table — v8 columns
+        ("parts", "part_type", "TEXT NOT NULL DEFAULT 'general'"),
+        ("parts", "brand_id", "INTEGER"),
+        ("parts", "brand_part_number", "TEXT DEFAULT ''"),
+        ("parts", "local_part_number", "TEXT DEFAULT ''"),
+        ("parts", "image_path", "TEXT DEFAULT ''"),
+        ("parts", "subcategory", "TEXT DEFAULT ''"),
+        ("parts", "color_options", "TEXT DEFAULT '[]'"),
+        ("parts", "type_style", "TEXT DEFAULT '[]'"),
+        ("parts", "has_qr_tag", "INTEGER NOT NULL DEFAULT 0"),
+        ("parts", "name", "TEXT DEFAULT ''"),
+        ("parts", "max_quantity", "INTEGER DEFAULT 0"),
+        ("parts", "pdfs", "TEXT DEFAULT '[]'"),
+        # Parts — v10 deprecation
+        ("parts", "deprecation_status", "TEXT DEFAULT NULL"),
+        ("parts", "deprecation_started_at", "TIMESTAMP"),
+        # Jobs — v11
+        ("jobs", "bill_out_rate", "TEXT NOT NULL DEFAULT ''"),
+        # Suppliers — v7
+        ("suppliers", "is_supply_house", "INTEGER NOT NULL DEFAULT 0"),
+        ("suppliers", "operating_hours", "TEXT"),
+        # Truck inventory — v10
+        ("truck_inventory", "min_quantity", "INTEGER NOT NULL DEFAULT 0"),
+        ("truck_inventory", "max_quantity", "INTEGER NOT NULL DEFAULT 0"),
+        # Notifications — v10
+        ("notifications", "target_tab", "TEXT DEFAULT ''"),
+        ("notifications", "target_data", "TEXT DEFAULT ''"),
+        # Truck transfers — v10
+        ("truck_transfers", "parts_list_id", "INTEGER"),
+        ("truck_transfers", "job_id", "INTEGER"),
+        # Labor entries — v11 BRO snapshot
+        ("labor_entries", "bill_out_rate", "TEXT NOT NULL DEFAULT ''"),
+        # Truck transfers — v12 supplier tracking
+        ("truck_transfers", "source_order_id", "INTEGER"),
+        ("truck_transfers", "supplier_id", "INTEGER"),
+        # Consumption log — v12 supplier tracking
+        ("consumption_log", "supplier_id", "INTEGER"),
+        ("consumption_log", "source_order_id", "INTEGER"),
+        # Job parts — v12 supplier tracking
+        ("job_parts", "supplier_id", "INTEGER"),
+        ("job_parts", "source_order_id", "INTEGER"),
+        # Receive log — v12 denormalized supplier
+        ("receive_log", "supplier_id", "INTEGER"),
+    ]
+
+    for table, column, definition in _REQUIRED_COLUMNS:
+        # Check if column exists using PRAGMA
+        existing = {
+            row["name"]
+            for row in conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+        }
+        if column not in existing:
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+            except Exception:
+                pass  # Table might not exist yet (shouldn't happen)
+
+
 def initialize_database(db_connection):
     """Create all tables, indexes, triggers, and seed data.
 
-    On a fresh database, creates the full v10 schema directly.
+    On a fresh database, creates the full v11 schema directly.
     On an existing database, applies migrations incrementally.
     """
     with db_connection.get_connection() as conn:
@@ -1679,6 +1925,17 @@ def initialize_database(db_connection):
                 _migrate_v8_to_v9(conn)
             if version < 10:
                 _migrate_v9_to_v10(conn)
+            if version < 11:
+                _migrate_v10_to_v11(conn)
+            if version < 12:
+                _migrate_v11_to_v12(conn)
+
+        # Ensure all required columns exist (safety net for edge-case
+        # migrations that may have silently failed on ALTER TABLE)
+        _ensure_required_columns(conn)
+
+        # Rename legacy system hats to new names (idempotent)
+        _rename_legacy_hats(conn)
 
         # Always refresh system hats to latest permissions
         _refresh_system_hat_permissions(conn)

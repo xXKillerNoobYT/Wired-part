@@ -127,15 +127,26 @@ class SettingsPage(QWidget):
         self._setup_labor_tab()
         self.sub_tabs.addTab(self.labor_widget, "Labor")
 
-        # Notebook tab
+        # Job Customizations tab (notebook template + BRO categories)
         self.notebook_widget = QWidget()
-        self._setup_notebook_tab()
-        self.sub_tabs.addTab(self.notebook_widget, "Notebook")
+        self._setup_job_customizations_tab()
+        self.sub_tabs.addTab(self.notebook_widget, "Job Customizations")
 
         # General tab
         self.general_widget = QWidget()
         self._setup_general_tab()
         self.sub_tabs.addTab(self.general_widget, "General")
+
+        # Auto-fetch models when LLM tab is first opened
+        self._llm_models_fetched = False
+        self.sub_tabs.currentChanged.connect(self._on_settings_tab_changed)
+
+    def _on_settings_tab_changed(self, index: int):
+        """Auto-fetch models when LLM tab is first opened."""
+        if self.sub_tabs.widget(index) is self.llm_widget:
+            if not self._llm_models_fetched:
+                self._llm_models_fetched = True
+                self._fetch_models()
 
     # ── Users Tab ───────────────────────────────────────────────
 
@@ -237,13 +248,16 @@ class SettingsPage(QWidget):
 
         from wired_part.utils.constants import (
             FULL_ACCESS_HATS,
+            LOCKED_HAT_IDS,
             PERMISSION_GROUPS,
             PERMISSION_LABELS,
         )
 
         layout.addWidget(QLabel(
             "Hats define what each user can see and do in the application.\n"
-            "Select a hat on the left to view and edit its permissions."
+            "Select a hat on the left to view and edit its permissions.\n"
+            "Locked hats (\U0001f512) can be renamed but their permissions "
+            "cannot be changed."
         ))
 
         # ── Hat selector and permission editor side by side ─────
@@ -251,7 +265,7 @@ class SettingsPage(QWidget):
 
         splitter = QSplitter()
 
-        # Left: Hat list
+        # Left: Hat list + management buttons
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -263,6 +277,26 @@ class SettingsPage(QWidget):
         self.hats_list = QListWidget()
         self.hats_list.currentRowChanged.connect(self._on_hat_selected)
         left_layout.addWidget(self.hats_list)
+
+        # Hat management buttons
+        hat_btn_row = QHBoxLayout()
+        hat_btn_row.setSpacing(4)
+        add_hat_btn = QPushButton("+ Add")
+        add_hat_btn.setToolTip("Create a new custom hat")
+        add_hat_btn.clicked.connect(self._add_hat)
+        hat_btn_row.addWidget(add_hat_btn)
+
+        rename_hat_btn = QPushButton("Rename")
+        rename_hat_btn.setToolTip("Rename the selected hat")
+        rename_hat_btn.clicked.connect(self._rename_hat)
+        hat_btn_row.addWidget(rename_hat_btn)
+
+        delete_hat_btn = QPushButton("Delete")
+        delete_hat_btn.setToolTip("Delete the selected custom hat")
+        delete_hat_btn.clicked.connect(self._delete_hat)
+        hat_btn_row.addWidget(delete_hat_btn)
+
+        left_layout.addLayout(hat_btn_row)
 
         splitter.addWidget(left)
 
@@ -279,6 +313,7 @@ class SettingsPage(QWidget):
 
         self.hat_info_label = QLabel("")
         self.hat_info_label.setStyleSheet("color: #a6adc8;")
+        self.hat_info_label.setWordWrap(True)
         right_layout.addWidget(self.hat_info_label)
 
         # Scrollable permissions area
@@ -324,17 +359,20 @@ class SettingsPage(QWidget):
 
     def _refresh_hats(self):
         """Reload the hats list."""
+        from wired_part.utils.constants import LOCKED_HAT_IDS
         self.hats_list.clear()
         hats = self.repo.get_all_hats()
         for hat in hats:
-            self.hats_list.addItem(hat.name)
-            # Store hat id in the item
+            label = hat.name
+            if hat.id in LOCKED_HAT_IDS:
+                label = f"\U0001f512 {hat.name}"
+            self.hats_list.addItem(label)
             item = self.hats_list.item(self.hats_list.count() - 1)
             item.setData(Qt.ItemDataRole.UserRole, hat.id)
 
     def _on_hat_selected(self, row: int):
         """Load permissions for the selected hat."""
-        from wired_part.utils.constants import FULL_ACCESS_HATS
+        from wired_part.utils.constants import FULL_ACCESS_HATS, LOCKED_HAT_IDS
 
         if row < 0:
             self.hat_name_label.setText("Select a hat")
@@ -348,14 +386,24 @@ class SettingsPage(QWidget):
         if not hat:
             return
 
-        self.hat_name_label.setText(f"{hat.name}")
+        is_locked = hat_id in LOCKED_HAT_IDS
         is_full = hat.name in FULL_ACCESS_HATS
+
+        lock_icon = "\U0001f512 " if is_locked else ""
+        self.hat_name_label.setText(f"{lock_icon}{hat.name}")
 
         if is_full:
             self.hat_info_label.setText(
-                "Full access — all permissions granted automatically."
+                "Full access — all permissions granted automatically.\n"
+                "This hat is locked. Permissions cannot be changed."
             )
             self.hat_info_label.setStyleSheet("color: #a6e3a1;")
+        elif is_locked:
+            self.hat_info_label.setText(
+                "This hat is locked — permissions cannot be changed.\n"
+                "You can still rename it."
+            )
+            self.hat_info_label.setStyleSheet("color: #fab387;")
         else:
             self.hat_info_label.setText(
                 "Customize which permissions this hat grants."
@@ -369,15 +417,117 @@ class SettingsPage(QWidget):
             if is_full:
                 cb.setChecked(True)
                 cb.setEnabled(False)
+            elif is_locked:
+                cb.setChecked(key in current_perms)
+                cb.setEnabled(False)
             else:
                 cb.setChecked(key in current_perms)
                 cb.setEnabled(True)
             cb.blockSignals(False)
 
-        self.save_perms_btn.setEnabled(not is_full)
+        self.save_perms_btn.setEnabled(not is_locked and not is_full)
+
+    def _add_hat(self):
+        """Create a new custom hat."""
+        from wired_part.database.models import Hat
+        name, ok = QInputDialog.getText(
+            self, "New Hat", "Hat name:"
+        )
+        if ok and name.strip():
+            existing = self.repo.get_hat_by_name(name.strip())
+            if existing:
+                QMessageBox.warning(
+                    self, "Duplicate",
+                    f"A hat named '{name.strip()}' already exists.",
+                )
+                return
+            self.repo.create_hat(Hat(
+                name=name.strip(), permissions="[]", is_system=0,
+            ))
+            self._refresh_hats()
+            self.hat_perm_status.setText(
+                f"Hat '{name.strip()}' created. "
+                "Select it to configure permissions."
+            )
+            self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
+
+    def _rename_hat(self):
+        """Rename the selected hat (allowed even for locked hats)."""
+        row = self.hats_list.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self, "Info", "Select a hat to rename."
+            )
+            return
+        item = self.hats_list.item(row)
+        hat_id = item.data(Qt.ItemDataRole.UserRole)
+        hat = self.repo.get_hat_by_id(hat_id)
+        if not hat:
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Hat", "New name:", text=hat.name,
+        )
+        if ok and new_name.strip() and new_name.strip() != hat.name:
+            # Check for duplicate name
+            existing = self.repo.get_hat_by_name(new_name.strip())
+            if existing and existing.id != hat_id:
+                QMessageBox.warning(
+                    self, "Duplicate",
+                    f"A hat named '{new_name.strip()}' already exists.",
+                )
+                return
+            self.repo.rename_hat(hat_id, new_name.strip())
+            self._refresh_hats()
+            self.hat_perm_status.setText(
+                f"Renamed to '{new_name.strip()}'."
+            )
+            self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
+
+    def _delete_hat(self):
+        """Delete a custom hat. Locked hats cannot be deleted."""
+        from wired_part.utils.constants import LOCKED_HAT_IDS
+        row = self.hats_list.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self, "Info", "Select a hat to delete."
+            )
+            return
+        item = self.hats_list.item(row)
+        hat_id = item.data(Qt.ItemDataRole.UserRole)
+
+        if hat_id in LOCKED_HAT_IDS:
+            QMessageBox.warning(
+                self, "Locked Hat",
+                "This hat is locked and cannot be deleted.\n"
+                "Only custom hats can be deleted.",
+            )
+            return
+
+        hat = self.repo.get_hat_by_id(hat_id)
+        if not hat:
+            return
+
+        reply = QMessageBox.question(
+            self, "Delete Hat",
+            f"Delete '{hat.name}'?\n\n"
+            "Users assigned this hat will lose its permissions.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                self.repo.delete_hat(hat_id)
+                self._refresh_hats()
+                self.hat_perm_status.setText(
+                    f"Hat '{hat.name}' deleted."
+                )
+                self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
+            except ValueError as e:
+                QMessageBox.warning(self, "Error", str(e))
 
     def _save_hat_permissions(self):
         """Save the edited permissions for the selected hat."""
+        from wired_part.utils.constants import LOCKED_HAT_IDS
         row = self.hats_list.currentRow()
         if row < 0:
             return
@@ -385,17 +535,28 @@ class SettingsPage(QWidget):
         item = self.hats_list.item(row)
         hat_id = item.data(Qt.ItemDataRole.UserRole)
 
+        if hat_id in LOCKED_HAT_IDS:
+            QMessageBox.warning(
+                self, "Locked Hat",
+                "This hat is locked. Permissions cannot be changed.",
+            )
+            return
+
         perms = [
             key for key, cb in self._perm_checkboxes.items()
             if cb.isChecked()
         ]
 
-        self.repo.update_hat_permissions(hat_id, perms)
-        self.hat_perm_status.setText(
-            f"Permissions saved for {item.text()} "
-            f"({len(perms)} permissions granted)."
-        )
-        self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
+        try:
+            self.repo.update_hat_permissions(hat_id, perms)
+            hat = self.repo.get_hat_by_id(hat_id)
+            self.hat_perm_status.setText(
+                f"Permissions saved for {hat.name if hat else 'hat'} "
+                f"({len(perms)} permissions granted)."
+            )
+            self.hat_perm_status.setStyleSheet("color: #a6e3a1;")
+        except ValueError as e:
+            QMessageBox.warning(self, "Error", str(e))
 
     # ── Categories Tab ──────────────────────────────────────────
 
@@ -620,12 +781,19 @@ class SettingsPage(QWidget):
         self.llm_key_input.setPlaceholderText("lm-studio")
         conn_layout.addRow("API Key:", self.llm_key_input)
 
-        # Model picker — editable combo box
+        # Model picker — dropdown with editable fallback for custom names
         model_row = QHBoxLayout()
         self.llm_model_combo = QComboBox()
         self.llm_model_combo.setEditable(True)
         self.llm_model_combo.setMinimumWidth(200)
-        self.llm_model_combo.lineEdit().setPlaceholderText("local-model")
+        self.llm_model_combo.setMaxVisibleItems(20)
+        self.llm_model_combo.lineEdit().setPlaceholderText(
+            "Click Refresh or select from list"
+        )
+        self.llm_model_combo.setToolTip(
+            "Select a model from the dropdown, or type a custom name.\n"
+            "Click Refresh to fetch available models from the server."
+        )
         self.llm_model_combo.addItem(Config.LM_STUDIO_MODEL)
         self.llm_model_combo.setCurrentText(Config.LM_STUDIO_MODEL)
         model_row.addWidget(self.llm_model_combo, 1)
@@ -987,16 +1155,31 @@ class SettingsPage(QWidget):
         idx = self.billing_cycle_combo.findData(Config.DEFAULT_BILLING_CYCLE)
         if idx >= 0:
             self.billing_cycle_combo.setCurrentIndex(idx)
+        self.billing_cycle_combo.currentIndexChanged.connect(
+            self._on_billing_cycle_changed
+        )
         billing_form.addRow("Cycle Type:", self.billing_cycle_combo)
 
+        # Day-of-week combo (shown for weekly/biweekly)
+        self.billing_day_of_week = QComboBox()
+        for i, day_name in enumerate(
+            ["Monday", "Tuesday", "Wednesday", "Thursday",
+             "Friday", "Saturday", "Sunday"], start=1
+        ):
+            self.billing_day_of_week.addItem(day_name, i)
+        billing_form.addRow("Day of Week:", self.billing_day_of_week)
+
+        # Day-of-month spin (shown for monthly/quarterly)
         self.billing_day_spin = QSpinBox()
         self.billing_day_spin.setRange(1, 31)
-        self.billing_day_spin.setValue(Config.DEFAULT_BILLING_DAY)
-        self.billing_day_spin.setToolTip(
-            "Day of month for monthly/quarterly, or day of week "
-            "(1=Mon) for weekly/biweekly"
-        )
+        self.billing_day_spin.setToolTip("Day of month for billing")
         billing_form.addRow("Billing Day:", self.billing_day_spin)
+
+        # Set initial values and visibility
+        self._set_billing_day_value(
+            Config.DEFAULT_BILLING_CYCLE, Config.DEFAULT_BILLING_DAY,
+        )
+        self._on_billing_cycle_changed()
 
         billing_group.setLayout(billing_form)
         layout.addWidget(billing_group)
@@ -1009,6 +1192,54 @@ class SettingsPage(QWidget):
         self.billing_status = QLabel("")
         self.billing_status.setWordWrap(True)
         layout.addWidget(self.billing_status)
+
+        # ── Timesheet Report Cycle ──────────────────────────────
+        ts_group = QGroupBox("Timesheet Report Cycle")
+        ts_form = QFormLayout()
+
+        self.ts_cycle_combo = QComboBox()
+        self.ts_cycle_combo.addItem("Weekly", "weekly")
+        self.ts_cycle_combo.addItem("Biweekly", "biweekly")
+        self.ts_cycle_combo.addItem("Monthly", "monthly")
+        self.ts_cycle_combo.addItem("Quarterly", "quarterly")
+        ts_idx = self.ts_cycle_combo.findData(Config.TIMESHEET_CYCLE)
+        if ts_idx >= 0:
+            self.ts_cycle_combo.setCurrentIndex(ts_idx)
+        self.ts_cycle_combo.currentIndexChanged.connect(
+            self._on_ts_cycle_changed
+        )
+        ts_form.addRow("Cycle Type:", self.ts_cycle_combo)
+
+        # Day-of-week combo (shown for weekly/biweekly)
+        self.ts_day_of_week = QComboBox()
+        for i, day_name in enumerate(
+            ["Monday", "Tuesday", "Wednesday", "Thursday",
+             "Friday", "Saturday", "Sunday"], start=1
+        ):
+            self.ts_day_of_week.addItem(day_name, i)
+        ts_form.addRow("Day of Week:", self.ts_day_of_week)
+
+        # Day-of-month spin (shown for monthly/quarterly)
+        self.ts_day_spin = QSpinBox()
+        self.ts_day_spin.setRange(1, 31)
+        self.ts_day_spin.setToolTip("Day of month for timesheet report")
+        ts_form.addRow("Report Day:", self.ts_day_spin)
+
+        # Set initial values and visibility
+        self._set_ts_day_value(Config.TIMESHEET_CYCLE, Config.TIMESHEET_DAY)
+        self._on_ts_cycle_changed()
+
+        ts_group.setLayout(ts_form)
+        layout.addWidget(ts_group)
+
+        ts_save_btn = QPushButton("Save Timesheet Settings")
+        ts_save_btn.setMinimumHeight(34)
+        ts_save_btn.clicked.connect(self._save_timesheet_config)
+        layout.addWidget(ts_save_btn)
+
+        self.ts_status = QLabel("")
+        self.ts_status.setWordWrap(True)
+        layout.addWidget(self.ts_status)
 
         layout.addStretch()
 
@@ -1037,23 +1268,112 @@ class SettingsPage(QWidget):
         self.labor_status.setText("Labor settings saved successfully.")
         self.labor_status.setStyleSheet("color: #a6e3a1;")
 
+    def _on_billing_cycle_changed(self):
+        """Toggle between day-of-week and day-of-month for billing."""
+        cycle = self.billing_cycle_combo.currentData()
+        is_weekly = cycle in ("weekly", "biweekly")
+        self.billing_day_of_week.setVisible(is_weekly)
+        self.billing_day_spin.setVisible(not is_weekly)
+
+    def _set_billing_day_value(self, cycle: str, day: int):
+        """Set the correct widget value based on cycle type."""
+        if cycle in ("weekly", "biweekly"):
+            idx = self.billing_day_of_week.findData(day)
+            if idx >= 0:
+                self.billing_day_of_week.setCurrentIndex(idx)
+        else:
+            self.billing_day_spin.setValue(day)
+
+    def _on_ts_cycle_changed(self):
+        """Toggle between day-of-week and day-of-month for timesheets."""
+        cycle = self.ts_cycle_combo.currentData()
+        is_weekly = cycle in ("weekly", "biweekly")
+        self.ts_day_of_week.setVisible(is_weekly)
+        self.ts_day_spin.setVisible(not is_weekly)
+
+    def _set_ts_day_value(self, cycle: str, day: int):
+        """Set the correct widget value based on cycle type."""
+        if cycle in ("weekly", "biweekly"):
+            idx = self.ts_day_of_week.findData(day)
+            if idx >= 0:
+                self.ts_day_of_week.setCurrentIndex(idx)
+        else:
+            self.ts_day_spin.setValue(day)
+
     def _save_billing_config(self):
         from wired_part.config import Config
 
         cycle = self.billing_cycle_combo.currentData()
-        day = self.billing_day_spin.value()
+        if cycle in ("weekly", "biweekly"):
+            day = self.billing_day_of_week.currentData()
+        else:
+            day = self.billing_day_spin.value()
         Config.update_billing_settings(cycle, day)
         self.billing_status.setText("Billing settings saved successfully.")
         self.billing_status.setStyleSheet("color: #a6e3a1;")
 
+    def _save_timesheet_config(self):
+        from wired_part.config import Config
+
+        cycle = self.ts_cycle_combo.currentData()
+        if cycle in ("weekly", "biweekly"):
+            day = self.ts_day_of_week.currentData()
+        else:
+            day = self.ts_day_spin.value()
+        Config.update_timesheet_settings(cycle, day)
+        self.ts_status.setText("Timesheet settings saved successfully.")
+        self.ts_status.setStyleSheet("color: #a6e3a1;")
+
     # ── Notebook Tab ─────────────────────────────────────────────
 
-    def _setup_notebook_tab(self):
-        """Configure default notebook sections template for new jobs."""
+    def _setup_job_customizations_tab(self):
+        """Configure job defaults: BRO categories + notebook sections."""
         layout = QVBoxLayout(self.notebook_widget)
 
         from wired_part.config import Config
 
+        # ── BRO Categories ────────────────────────────────────
+        bro_group = QGroupBox("BRO (Bill Out Rate) Categories")
+        bro_layout = QVBoxLayout()
+        bro_layout.addWidget(QLabel(
+            "Customize the BRO categories available on jobs.\n"
+            "These are bookkeeper classification codes (e.g. C, T&M, SERVICE).\n"
+            "Categories in use by active/on-hold jobs cannot be removed."
+        ))
+
+        self.bro_list = QListWidget()
+        self.bro_list.setMaximumHeight(140)
+        for cat in Config.get_bro_categories():
+            self.bro_list.addItem(cat)
+        bro_layout.addWidget(self.bro_list)
+
+        bro_btns = QHBoxLayout()
+        bro_add_btn = QPushButton("Add")
+        bro_add_btn.clicked.connect(self._bro_add)
+        bro_btns.addWidget(bro_add_btn)
+
+        bro_edit_btn = QPushButton("Edit")
+        bro_edit_btn.clicked.connect(self._bro_edit)
+        bro_btns.addWidget(bro_edit_btn)
+
+        bro_remove_btn = QPushButton("Remove")
+        bro_remove_btn.clicked.connect(self._bro_remove)
+        bro_btns.addWidget(bro_remove_btn)
+
+        bro_save_btn = QPushButton("Save BRO List")
+        bro_save_btn.setMinimumHeight(30)
+        bro_save_btn.clicked.connect(self._save_bro_categories)
+        bro_btns.addWidget(bro_save_btn)
+
+        bro_layout.addLayout(bro_btns)
+
+        self.bro_status = QLabel("")
+        bro_layout.addWidget(self.bro_status)
+
+        bro_group.setLayout(bro_layout)
+        layout.addWidget(bro_group)
+
+        # ── Notebook Sections Template ──────────────────────────
         template_group = QGroupBox("Default Sections for New Job Notebooks")
         tpl_layout = QVBoxLayout()
 
@@ -1064,7 +1384,7 @@ class SettingsPage(QWidget):
         ))
 
         self.sections_list = QListWidget()
-        self.sections_list.setMinimumHeight(160)
+        self.sections_list.setMinimumHeight(140)
         self.sections_list.setToolTip(
             "Drag to reorder, or use Move Up/Down buttons"
         )
@@ -1235,7 +1555,124 @@ class SettingsPage(QWidget):
         self.general_status = QLabel("")
         layout.addWidget(self.general_status)
 
+        # ── Order Settings ─────────────────────────────────────
+        order_group = QGroupBox("Order & Return Settings")
+        order_form = QFormLayout()
+
+        self.po_prefix_input = QLineEdit(Config.ORDER_NUMBER_PREFIX)
+        self.po_prefix_input.setMaxLength(10)
+        self.po_prefix_input.setToolTip(
+            "Prefix for purchase order numbers (e.g. PO → PO-2026-001)"
+        )
+        order_form.addRow("PO Number Prefix:", self.po_prefix_input)
+
+        self.ra_prefix_input = QLineEdit(Config.RA_NUMBER_PREFIX)
+        self.ra_prefix_input.setMaxLength(10)
+        self.ra_prefix_input.setToolTip(
+            "Prefix for return authorization numbers (e.g. RA → RA-2026-001)"
+        )
+        order_form.addRow("RA Number Prefix:", self.ra_prefix_input)
+
+        self.auto_close_check = QCheckBox("Auto-close orders when fully received")
+        self.auto_close_check.setChecked(bool(Config.AUTO_CLOSE_RECEIVED_ORDERS))
+        self.auto_close_check.setToolTip(
+            "When enabled, orders are automatically set to 'closed' "
+            "when all items are received"
+        )
+        order_form.addRow("", self.auto_close_check)
+
+        order_group.setLayout(order_form)
+        layout.addWidget(order_group)
+
+        order_save_btn = QPushButton("Save Order Settings")
+        order_save_btn.setMinimumHeight(34)
+        order_save_btn.clicked.connect(self._save_order_config)
+        layout.addWidget(order_save_btn)
+
+        self.order_status = QLabel("")
+        self.order_status.setWordWrap(True)
+        layout.addWidget(self.order_status)
+
         layout.addStretch()
+
+    def _bro_add(self):
+        text, ok = QInputDialog.getText(
+            self, "Add BRO Category", "Category code:"
+        )
+        if ok and text.strip():
+            val = text.strip().upper()
+            # Check for duplicate
+            existing = [
+                self.bro_list.item(i).text()
+                for i in range(self.bro_list.count())
+            ]
+            if val in existing:
+                self.bro_status.setText(f"'{val}' already exists.")
+                self.bro_status.setStyleSheet("color: #f38ba8;")
+                return
+            self.bro_list.addItem(val)
+            self.bro_status.setText(f"Added '{val}'. Click Save to persist.")
+            self.bro_status.setStyleSheet("color: #fab387;")
+
+    def _bro_edit(self):
+        item = self.bro_list.currentItem()
+        if not item:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Edit BRO Category", "Category code:", text=item.text()
+        )
+        if ok and text.strip():
+            item.setText(text.strip().upper())
+            self.bro_status.setText("Updated. Click Save to persist.")
+            self.bro_status.setStyleSheet("color: #fab387;")
+
+    def _bro_remove(self):
+        row = self.bro_list.currentRow()
+        if row < 0:
+            return
+        cat_name = self.bro_list.item(row).text()
+
+        # Protect: don't allow removal if active/on-hold jobs use this BRO
+        active_jobs = [
+            j for j in self.repo.get_all_jobs()
+            if j.bill_out_rate == cat_name
+            and j.status in ("active", "on_hold")
+        ]
+        if active_jobs:
+            job_list = ", ".join(j.job_number for j in active_jobs[:5])
+            extra = (
+                f" and {len(active_jobs) - 5} more"
+                if len(active_jobs) > 5 else ""
+            )
+            QMessageBox.warning(
+                self, "Cannot Remove BRO",
+                f"'{cat_name}' is used by active/on-hold jobs:\n"
+                f"{job_list}{extra}\n\n"
+                "Complete or change the BRO on those jobs first.",
+            )
+            return
+
+        self.bro_list.takeItem(row)
+        self.bro_status.setText(
+            f"Removed '{cat_name}'. Click Save to persist."
+        )
+        self.bro_status.setStyleSheet("color: #fab387;")
+
+    def _save_bro_categories(self):
+        from wired_part.config import Config
+        categories = [
+            self.bro_list.item(i).text()
+            for i in range(self.bro_list.count())
+        ]
+        if not categories:
+            self.bro_status.setText("At least one BRO category is required.")
+            self.bro_status.setStyleSheet("color: #f38ba8;")
+            return
+        Config.update_bro_categories(categories)
+        self.bro_status.setText(
+            f"Saved {len(categories)} BRO categories."
+        )
+        self.bro_status.setStyleSheet("color: #a6e3a1;")
 
     def _save_theme(self):
         from wired_part.config import Config
@@ -1245,6 +1682,26 @@ class SettingsPage(QWidget):
             f"Theme set to '{theme}'. Restart the app to apply."
         )
         self.general_status.setStyleSheet("color: #a6e3a1;")
+
+    def _save_order_config(self):
+        from wired_part.config import Config
+
+        po_prefix = self.po_prefix_input.text().strip()
+        ra_prefix = self.ra_prefix_input.text().strip()
+        auto_close = self.auto_close_check.isChecked()
+
+        if not po_prefix:
+            self.order_status.setText("PO prefix cannot be empty.")
+            self.order_status.setStyleSheet("color: #f38ba8;")
+            return
+        if not ra_prefix:
+            self.order_status.setText("RA prefix cannot be empty.")
+            self.order_status.setStyleSheet("color: #f38ba8;")
+            return
+
+        Config.update_order_settings(po_prefix, ra_prefix, auto_close)
+        self.order_status.setText("Order settings saved successfully.")
+        self.order_status.setStyleSheet("color: #a6e3a1;")
 
     # ── Refresh ─────────────────────────────────────────────────
 

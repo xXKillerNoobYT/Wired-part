@@ -1,5 +1,6 @@
 """Add / Edit Job dialog with GPS location support."""
 
+import re
 import subprocess
 from typing import Optional
 
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from wired_part.config import Config
 from wired_part.database.models import Job
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import JOB_STATUSES
@@ -46,10 +48,17 @@ class _JobLocationWorker(QThread):
                 "$w.Stop()"
             )
             result = subprocess.run(
-                ["powershell", "-Command", ps_script],
+                ["powershell", "-NoProfile", "-Command", ps_script],
                 capture_output=True, text=True, timeout=15,
             )
-            output = result.stdout.strip()
+            # Strip ANSI / VS Code terminal escape sequences
+            raw = result.stdout
+            output = re.sub(
+                r"\x1b\].*?\x07"
+                r"|\x1b\[[0-9;]*[A-Za-z]"
+                r"|\x1b[^[\]].?",
+                "", raw,
+            ).strip()
             if output and output != "FAILED" and "," in output:
                 parts = output.split(",")
                 self.location_found.emit(float(parts[0]), float(parts[1]))
@@ -67,10 +76,12 @@ class JobDialog(QDialog):
         repo: Repository,
         job: Optional[Job] = None,
         parent=None,
+        show_bro: bool = True,
     ):
         super().__init__(parent)
         self.repo = repo
         self.job = job
+        self._show_bro = show_bro
         self.setWindowTitle("Edit Job" if job else "New Job")
         self.setMinimumWidth(460)
         self._setup_ui()
@@ -119,6 +130,20 @@ class JobDialog(QDialog):
         self.notes_input = QTextEdit()
         self.notes_input.setMaximumHeight(80)
         form.addRow("Notes:", self.notes_input)
+
+        self.bro_combo = QComboBox()
+        self.bro_combo.setEditable(False)
+        self.bro_combo.setToolTip(
+            "Bill Out Rate category — bookkeeper classification "
+            "(e.g. C, T&M, SERVICE, EMERGENCY)"
+        )
+        self.bro_combo.addItem("(None)", "")
+        for cat in Config.get_bro_categories():
+            self.bro_combo.addItem(cat, cat)
+        if self._show_bro:
+            form.addRow("BRO:", self.bro_combo)
+        else:
+            self.bro_combo.setVisible(False)
 
         layout.addLayout(form)
 
@@ -173,6 +198,14 @@ class JobDialog(QDialog):
         if idx >= 0:
             self.status_input.setCurrentIndex(idx)
         self.priority_input.setValue(job.priority or 3)
+        bro_idx = self.bro_combo.findData(job.bill_out_rate or "")
+        if bro_idx >= 0:
+            self.bro_combo.setCurrentIndex(bro_idx)
+        else:
+            # Value not in current list — add it so it's not lost
+            if job.bill_out_rate:
+                self.bro_combo.addItem(job.bill_out_rate, job.bill_out_rate)
+                self.bro_combo.setCurrentIndex(self.bro_combo.count() - 1)
 
         # Load existing GPS location
         location = self.repo.get_job_location(job.id)
@@ -218,6 +251,7 @@ class JobDialog(QDialog):
             status=self.status_input.currentData(),
             priority=self.priority_input.value(),
             notes=self.notes_input.toPlainText().strip(),
+            bill_out_rate=self.bro_combo.currentData() or "",
         )
 
         if self.job:

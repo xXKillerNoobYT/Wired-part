@@ -438,7 +438,12 @@ class CatalogSubPage(QWidget):
             self.refresh()
 
     def _on_delete_part(self):
-        """Start deprecation pipeline for the selected part."""
+        """Delete or deprecate the selected part.
+
+        If the part has zero inventory everywhere (warehouse, trucks,
+        no open jobs), it can be immediately deleted.  Otherwise,
+        start the deprecation pipeline.
+        """
         part_id = self._selected_part_id()
         if part_id is None:
             return
@@ -447,20 +452,44 @@ class CatalogSubPage(QWidget):
             return
 
         display = part.display_name
+        progress = self.repo.check_deprecation_progress(part_id)
 
-        # Already deprecating?
+        all_clear = (
+            progress["job_quantity"] == 0
+            and progress["truck_quantity"] == 0
+            and progress["warehouse_quantity"] == 0
+        )
+
+        # Already archived → offer permanent delete
+        if part.deprecation_status == "archived":
+            reply = QMessageBox.question(
+                self, "Remove Archived Part",
+                f"'{display}' is archived.\n\n"
+                "Would you like to permanently remove it from the catalog?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.repo.delete_part(part_id)
+                self.refresh()
+            return
+
+        # Already in deprecation pipeline → offer cancel or advance
         if part.deprecation_status:
-            if part.deprecation_status == "archived":
+            new_status = self.repo.advance_deprecation(part_id)
+            if new_status == "archived":
                 QMessageBox.information(
-                    self, "Already Archived",
-                    f"'{display}' has already been archived.",
+                    self, "Part Archived",
+                    f"'{display}' has been archived.\n\n"
+                    "You can remove it permanently by clicking "
+                    "Delete Part again.",
                 )
+                self.refresh()
                 return
-            # Allow cancellation
             reply = QMessageBox.question(
                 self, "Deprecation In Progress",
-                f"'{display}' is currently being deprecated "
-                f"(status: {part.deprecation_status}).\n\n"
+                f"'{display}' is being deprecated "
+                f"(status: {new_status}).\n\n"
                 "Would you like to cancel the deprecation?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -470,49 +499,53 @@ class CatalogSubPage(QWidget):
                 self.refresh()
             return
 
-        # Step 1: Initial confirm
+        # ── Part has zero inventory everywhere → offer direct delete ──
+        if all_clear:
+            reply = QMessageBox.question(
+                self, "Delete Part",
+                f"Delete '{display}' from the catalog?\n\n"
+                "This part has zero inventory across warehouse, trucks, "
+                "and no open jobs using it.\n\n"
+                "This action cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.repo.delete_part(part_id)
+                self.refresh()
+            return
+
+        # ── Part still has inventory → start deprecation pipeline ──
         reply = QMessageBox.question(
             self, "Deprecate Part",
-            f"Would you like to start deprecating '{display}'?\n\n"
-            "This will begin a gradual phase-out process.",
+            f"'{display}' still has inventory in use:\n\n"
+            f"  Items on open jobs: {progress['job_quantity']}\n"
+            f"  On trucks: {progress['truck_quantity']}\n"
+            f"  Warehouse: {progress['warehouse_quantity']}\n\n"
+            "Would you like to start deprecating this part?\n"
+            "This will prevent new orders and phase it out.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        # Step 2: Show impact
-        progress = self.repo.check_deprecation_progress(part_id)
-        impact_msg = (
-            f"Deprecation impact for '{display}':\n\n"
-            f"  Open jobs using this part: {progress['open_jobs']}\n"
-            f"  Truck inventory quantity: {progress['truck_quantity']}\n"
-            f"  Warehouse quantity: {progress['warehouse_quantity']}\n\n"
-            "This will prevent new orders for this part and "
-            "phase it out over time.\n\n"
-            "Continue?"
-        )
-        reply2 = QMessageBox.warning(
-            self, "Confirm Deprecation",
-            impact_msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply2 != QMessageBox.Yes:
-            return
-
         self.repo.start_part_deprecation(part_id)
-        # Try to advance immediately if conditions are already met
         new_status = self.repo.advance_deprecation(part_id)
-        QMessageBox.information(
-            self, "Deprecation Started",
-            f"'{display}' deprecation started.\n"
-            f"Current status: {new_status}\n\n"
-            "The part will be automatically phased out as:\n"
-            "1. Open jobs are completed\n"
-            "2. Truck inventory reaches zero\n"
-            "3. Warehouse stock reaches zero",
-        )
+
+        if new_status == "archived":
+            QMessageBox.information(
+                self, "Part Archived",
+                f"'{display}' has been archived (all inventory was zero).\n\n"
+                "Click Delete Part again to permanently remove it.",
+            )
+        else:
+            QMessageBox.information(
+                self, "Deprecation Started",
+                f"'{display}' deprecation started.\n"
+                f"Current status: {new_status}\n\n"
+                "The part will be phased out as inventory reaches zero.",
+            )
         self.refresh()
 
     def _populate_table(self, entries: list[dict]):

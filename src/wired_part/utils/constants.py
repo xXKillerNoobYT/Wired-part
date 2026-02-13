@@ -1,8 +1,23 @@
 """Application-wide constants."""
 
 APP_NAME = "Wired-Part"
-APP_VERSION = "10.0.0"
+APP_VERSION = "12.0.0"
 APP_ORGANIZATION = "WeirdToo LLC"
+
+# ── v12: Activity Log ──────────────────────────────────────────
+ACTIVITY_ACTIONS = [
+    "created", "updated", "deleted", "received", "transferred",
+    "consumed", "returned", "clocked_in", "clocked_out",
+    "assigned", "unassigned", "completed", "reactivated",
+    "submitted", "cancelled", "commented",
+]
+
+ACTIVITY_ENTITY_TYPES = [
+    "job", "part", "order", "labor", "transfer", "return",
+    "user", "truck", "category", "supplier", "notebook",
+]
+
+JOB_UPDATE_TYPES = ["comment", "status_change", "assignment", "milestone"]
 
 # Job statuses
 JOB_STATUSES = ["active", "completed", "on_hold", "cancelled"]
@@ -22,9 +37,9 @@ USER_ROLES = ["admin", "user"]
 # ── Hats (role-based permissions) ────────────────────────────────
 # Ordered by privilege level (highest first)
 HAT_NAMES = [
-    "Admin",
-    "IT",
-    "Office",
+    "Admin / CEO / Owner",
+    "IT / Tech Junkie",
+    "Office / HR",
     "Job Manager",
     "Foreman",
     "Worker",
@@ -32,7 +47,18 @@ HAT_NAMES = [
 ]
 
 # Admin & IT are equivalent — full access to everything
-FULL_ACCESS_HATS = ["Admin", "IT"]
+FULL_ACCESS_HATS = ["Admin / CEO / Owner", "IT / Tech Junkie"]
+
+# Locked hats — permissions cannot be edited, hat cannot be deleted.
+# Tracked by DB id (1, 2, 3) so renaming doesn't break the lock.
+LOCKED_HAT_IDS = {1, 2, 3}  # Admin, IT, Office — always the first 3 seeded
+
+# Map of old hat names → new hat names for migration
+_HAT_RENAME_MAP = {
+    "Admin": "Admin / CEO / Owner",
+    "IT": "IT / Tech Junkie",
+    "Office": "Office / HR",
+}
 
 # Permission keys: each maps to a capability in the app
 PERMISSION_KEYS = [
@@ -45,6 +71,7 @@ PERMISSION_KEYS = [
     "tab_job_tracking",
     "tab_trucks",
     "tab_labor",
+    "tab_office",
     "tab_agent",
     "tab_settings",
     # Parts & Inventory actions
@@ -104,6 +131,7 @@ PERMISSION_LABELS = {
     "tab_job_tracking": "View Job Tracking",
     "tab_trucks": "View Trucks",
     "tab_labor": "View Labor Overview",
+    "tab_office": "View Office",
     "tab_agent": "View Agent",
     "tab_settings": "View Settings",
     "parts_add": "Add Parts",
@@ -163,12 +191,12 @@ PERMISSION_GROUPS = {
 
 # Default permissions for each hat (True = granted)
 DEFAULT_HAT_PERMISSIONS: dict[str, list[str]] = {
-    "Admin": list(PERMISSION_KEYS),  # All permissions
-    "IT": list(PERMISSION_KEYS),     # All permissions (same as Admin)
-    "Office": [
+    "Admin / CEO / Owner": list(PERMISSION_KEYS),  # All permissions
+    "IT / Tech Junkie": list(PERMISSION_KEYS),     # All permissions (same as Admin)
+    "Office / HR": [
         "tab_dashboard", "tab_parts_catalog", "tab_warehouse",
         "tab_trucks_inventory", "tab_jobs_inventory", "tab_job_tracking",
-        "tab_trucks", "tab_labor", "tab_orders", "tab_settings",
+        "tab_trucks", "tab_labor", "tab_office", "tab_orders", "tab_settings",
         "parts_add", "parts_edit", "parts_import", "parts_export",
         "parts_lists", "parts_brands", "parts_variants", "parts_qr_tags",
         "jobs_add", "jobs_edit", "jobs_assign", "jobs_billing",
@@ -183,7 +211,7 @@ DEFAULT_HAT_PERMISSIONS: dict[str, list[str]] = {
     "Job Manager": [
         "tab_dashboard", "tab_parts_catalog", "tab_warehouse",
         "tab_trucks_inventory", "tab_jobs_inventory", "tab_job_tracking",
-        "tab_trucks", "tab_labor", "tab_orders",
+        "tab_trucks", "tab_labor", "tab_office", "tab_orders",
         "parts_add", "parts_edit", "parts_export", "parts_lists",
         "parts_brands", "parts_variants",
         "jobs_add", "jobs_edit", "jobs_assign", "jobs_billing",
@@ -301,6 +329,9 @@ LOCKED_NOTEBOOK_SECTIONS = ["Daily Logs"]
 
 # Geolocation
 GEOFENCE_RADIUS_MILES = 0.5
+
+# Bill Out Rate (BRO) categories — customizable via Settings
+DEFAULT_BRO_CATEGORIES = ["C", "T&M", "SERVICE", "EMERGENCY"]
 
 # Report types
 REPORT_TYPES = ["internal", "client"]

@@ -313,8 +313,9 @@ class BillingDialog(QDialog):
             lines.append("")
             lines.append("  By Category:")
             for cat in by_cat:
+                name = cat.get("sub_task_category") or "Uncategorized"
                 lines.append(
-                    f"    {cat['category']}: {cat['hours']:.2f}h"
+                    f"    {name}: {cat['hours']:.2f}h"
                 )
 
         by_user = labor_summary.get("by_user", [])

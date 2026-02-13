@@ -240,6 +240,25 @@ class PartDialog(QDialog):
         self.notes_input.setMinimumHeight(50)
         common_form.addRow("Notes:", self.notes_input)
 
+        # Deprecation Status (only shown when editing an existing part)
+        deprec_row = QHBoxLayout()
+        self.deprecation_combo = QComboBox()
+        self.deprecation_combo.addItem("Active (Not Deprecated)", "")
+        self.deprecation_combo.addItem("Pending Deprecation", "pending")
+        self.deprecation_combo.addItem("Winding Down", "winding_down")
+        self.deprecation_combo.addItem("Zero Stock", "zero_stock")
+        self.deprecation_combo.addItem("Archived", "archived")
+        deprec_row.addWidget(self.deprecation_combo)
+        self.deprecation_date_label = QLabel("")
+        self.deprecation_date_label.setStyleSheet("color: #a6adc8;")
+        deprec_row.addWidget(self.deprecation_date_label)
+        deprec_row.addStretch()
+        common_form.addRow("Deprecation:", deprec_row)
+        # Hide deprecation for new parts (no sense deprecating something new)
+        if not self.part:
+            self.deprecation_combo.setVisible(False)
+            self.deprecation_date_label.setVisible(False)
+
         layout.addLayout(common_form)
 
         # ── Specific-Only Fields ────────────────────────────────
@@ -609,6 +628,19 @@ class PartDialog(QDialog):
                         cb.setChecked(True)
                         break
 
+        # Deprecation status
+        if part.deprecation_status:
+            idx = self.deprecation_combo.findData(part.deprecation_status)
+            if idx >= 0:
+                self.deprecation_combo.setCurrentIndex(idx)
+            if part.deprecation_started_at:
+                dep_date = str(part.deprecation_started_at)[:10]
+                self.deprecation_date_label.setText(
+                    f"Started: {dep_date}"
+                )
+        else:
+            self.deprecation_combo.setCurrentIndex(0)
+
         # Specific fields
         if part.brand_id:
             idx = self.brand_input.findData(part.brand_id)
@@ -763,9 +795,32 @@ class PartDialog(QDialog):
             type_style="[]",
             has_qr_tag=1 if self.qr_tag_check.isChecked() else 0,
             pdfs=json.dumps(self._pdf_paths) if is_specific else "[]",
+            deprecation_status=(
+                self.deprecation_combo.currentData() or None
+            ) if self.part else None,
+            deprecation_started_at=(
+                self.part.deprecation_started_at if self.part else None
+            ),
         )
 
         if self.part:
+            # Handle deprecation status changes
+            old_status = self.part.deprecation_status or ""
+            new_status = self.deprecation_combo.currentData() or ""
+            if new_status and not old_status:
+                # Starting deprecation — use the repo method
+                self.repo.start_part_deprecation(self.part.id)
+            elif not new_status and old_status:
+                # Cancelling deprecation
+                self.repo.cancel_deprecation(self.part.id)
+            elif new_status != old_status and new_status:
+                # Direct status change (admin override)
+                from datetime import datetime
+                data.deprecation_status = new_status
+                data.deprecation_started_at = (
+                    self.part.deprecation_started_at or datetime.now()
+                )
+
             self.repo.update_part(data)
             part_id = self.part.id
         else:
