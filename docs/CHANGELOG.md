@@ -4,6 +4,32 @@ All notable changes to Wired-Part are documented here.
 
 ---
 
+## [13.0.0] - 2026-02-12
+
+### Added
+- **File-based cloud sync** (`sync/sync_manager.py`) — synchronize databases between devices via any shared folder (Google Drive, OneDrive, Dropbox, local network). Each device exports/imports JSON sync files with last-write-wins merge, lock file management, and schema version checking.
+- **Config: sync settings** — `SYNC_ENABLED`, `SYNC_FOLDER_PATH`, `SYNC_INTERVAL_MINUTES`, `DEVICE_ID` (auto-generated UUID), `LAST_SYNC_TIMESTAMP`
+- **Notebook attachments** — new `notebook_attachments` table for file attachments per notebook page. Cascade delete removes attachments when pages are deleted.
+- **Rich text editor: hyperlinks** — Insert Link button with URL + display text dialog
+- **Rich text editor: image embedding** — Insert Image button with file picker and auto-scale to 600px max width
+- **Notebook widget: attachment panel** — add/remove/open file attachments per page
+- **Global search dialog (Ctrl+K)** — spotlight-style floating search across jobs, parts, users, orders, and notebook pages with category-colored results
+- **Toast notifications** (`ToastManager`) — non-intrusive slide-in alerts with severity coloring (info/success/warning/error) and auto-dismiss
+- **Team-aware labor filtering** — workers only see their own labor entries unless granted `labor_view_all` permission
+- **Enhanced status bar** — clock-in status with job name and time, search hint (Ctrl+K), notification count
+- 35 new tests for sync (23) and attachments (12)
+
+### Schema Changes
+| Table | Change |
+|-------|--------|
+| `notebook_attachments` | New table (page_id, filename, file_path, file_type, file_size) |
+| Schema version | 12 -> 13 |
+
+### Tests
+- 706 tests total (up from 671)
+
+---
+
 ## [12.1.0] - 2026-02-12
 
 ### Added

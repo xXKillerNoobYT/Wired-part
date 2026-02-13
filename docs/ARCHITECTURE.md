@@ -20,7 +20,7 @@ Wired-Part is a **desktop-first** inventory and job management application built
 │      SQLite via Python sqlite3          │
 ├─────────────────────────────────────────┤
 │           Schema + Migrations           │
-│    v1 -> v2 -> ... -> v12               │
+│    v1 -> v2 -> ... -> v13               │
 └─────────────────────────────────────────┘
 ```
 
@@ -49,9 +49,13 @@ src/wired_part/
     pages/               # Tab pages (parts, jobs, labor, etc.)
     widgets/             # Reusable widgets (notebook, rich text)
     styles/              # QSS themes (dark.qss, light.qss)
+  sync/
+    sync_manager.py      # File-based database sync engine
   utils/
     constants.py         # App-wide constants, permissions
     formatters.py        # Currency/quantity formatting
+    gps.py               # Cross-platform GPS detection
+    platform.py          # Platform-aware font selection
 tests/
   test_config.py
   test_database/         # Unit tests for repository
@@ -101,6 +105,23 @@ Supplier -> PurchaseOrder -> receive_order_items()
 ## Database
 
 - SQLite with WAL mode
-- Schema versioned (currently v12, 29 tables)
+- Schema versioned (currently v13, 30 tables)
 - Migrations are additive (ALTER TABLE, new tables)
 - Backfill SQL runs during migration for existing data
+
+## Sync Architecture
+
+```
+Device A                   Shared Folder              Device B
+┌──────────┐          ┌──────────────────┐         ┌──────────┐
+│ SQLite DB│──export──>│ sync_deviceA.json│<──import─│ SQLite DB│
+│          │<─import──│ sync_deviceB.json│──export──>│          │
+└──────────┘          │ wiredpart_lock   │         └──────────┘
+                      └──────────────────┘
+```
+
+- Each device has its own local SQLite database
+- Sync folder can be Google Drive, OneDrive, Dropbox, or any network path
+- JSON export per device, lock file prevents concurrent writes
+- Last-write-wins merge per row (using `updated_at` timestamps)
+- Schema version mismatch skips merge to prevent corruption

@@ -2995,7 +2995,15 @@ class Repository:
         )
 
     def submit_purchase_order(self, order_id: int):
-        """Transition order from draft to submitted."""
+        """Transition order from draft to submitted.
+
+        Raises ValueError if the order has no items.
+        """
+        items = self.get_order_items(order_id)
+        if not items:
+            raise ValueError(
+                "Cannot submit an order with no items."
+            )
         from datetime import datetime
         self.db.execute(
             "UPDATE purchase_orders SET status = 'submitted', "
@@ -3034,7 +3042,18 @@ class Repository:
     # ── Purchase Order Items ────────────────────────────────────────
 
     def add_order_item(self, item: PurchaseOrderItem) -> int:
-        """Add a line item to an order."""
+        """Add a line item to an order.
+
+        Raises ValueError for non-positive quantity or negative cost.
+        """
+        if item.quantity_ordered is None or item.quantity_ordered <= 0:
+            raise ValueError(
+                "quantity_ordered must be positive."
+            )
+        if item.unit_cost is not None and item.unit_cost < 0:
+            raise ValueError(
+                "unit_cost cannot be negative."
+            )
         with self.db.get_connection() as conn:
             cursor = conn.execute(
                 "INSERT INTO purchase_order_items "
@@ -3129,12 +3148,21 @@ class Repository:
         """
         count = 0
         with self.db.get_connection() as conn:
-            # Fetch the supplier_id from the PO (v12: supplier tracking)
+            # Verify order is in a receivable state
             po_row = conn.execute(
-                "SELECT supplier_id FROM purchase_orders WHERE id = ?",
+                "SELECT supplier_id, status FROM purchase_orders "
+                "WHERE id = ?",
                 (order_id,),
             ).fetchone()
-            supplier_id = po_row["supplier_id"] if po_row else None
+            if not po_row:
+                raise ValueError(f"Order {order_id} not found.")
+            if po_row["status"] not in ("submitted", "partial"):
+                raise ValueError(
+                    f"Order {order_id} cannot receive items "
+                    f"(status: {po_row['status']}). Only submitted "
+                    f"or partial orders can receive items."
+                )
+            supplier_id = po_row["supplier_id"]
 
             for receipt in receipts:
                 item_id = receipt["order_item_id"]
@@ -3143,6 +3171,24 @@ class Repository:
                 truck_id = receipt.get("allocate_truck_id")
                 job_id = receipt.get("allocate_job_id")
                 notes = receipt.get("notes", "")
+
+                # Check for over-receiving
+                item_row = conn.execute(
+                    "SELECT quantity_ordered, quantity_received "
+                    "FROM purchase_order_items WHERE id = ?",
+                    (item_id,),
+                ).fetchone()
+                if item_row:
+                    remaining = (
+                        item_row["quantity_ordered"]
+                        - item_row["quantity_received"]
+                    )
+                    if qty > remaining:
+                        raise ValueError(
+                            f"Cannot receive {qty} units for item "
+                            f"{item_id}: only {remaining} remaining "
+                            f"of {item_row['quantity_ordered']} ordered."
+                        )
 
                 # Update the order item's received quantity
                 conn.execute(
