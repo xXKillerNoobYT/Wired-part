@@ -36,6 +36,7 @@ class BrandManagementPage(QWidget):
         self._perms: set[str] = set()
         if current_user:
             self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._setup_ui()
         self.refresh()
 
@@ -205,7 +206,10 @@ class BrandManagementPage(QWidget):
                 QTableWidgetItem(part.part_number),
                 QTableWidgetItem(part.description),
                 QTableWidgetItem(part.brand_part_number),
-                QTableWidgetItem(format_currency(part.unit_cost)),
+                QTableWidgetItem(
+                    format_currency(part.unit_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(str(part.quantity)),
                 QTableWidgetItem(
                     f"{variant_count} variant(s)"

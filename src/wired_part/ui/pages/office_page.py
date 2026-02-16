@@ -86,6 +86,10 @@ class OfficePage(QWidget):
         super().__init__(parent)
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._setup_ui()
 
     def _setup_ui(self):
@@ -207,7 +211,9 @@ class OfficePage(QWidget):
 
         # Summary
         summary = QHBoxLayout()
-        self.billing_total_label = QLabel("Total: $0.00")
+        self.billing_total_label = QLabel(
+            "Total: $0.00" if self._can_see_dollars else "Total: \u2014"
+        )
         self.billing_total_label.setStyleSheet(
             "font-weight: bold; font-size: 16px;"
         )
@@ -297,11 +303,17 @@ class OfficePage(QWidget):
             hrs_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.billing_table.setItem(i, 2, hrs_item)
 
-            parts_item = QTableWidgetItem(format_currency(row["parts_cost"]))
+            parts_item = QTableWidgetItem(
+                format_currency(row["parts_cost"])
+                if self._can_see_dollars else "\u2014"
+            )
             parts_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.billing_table.setItem(i, 3, parts_item)
 
-            total_item = QTableWidgetItem(format_currency(row["total"]))
+            total_item = QTableWidgetItem(
+                format_currency(row["total"])
+                if self._can_see_dollars else "\u2014"
+            )
             total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             total_item.setForeground(Qt.green)
             self.billing_table.setItem(i, 4, total_item)
@@ -312,6 +324,8 @@ class OfficePage(QWidget):
         self.billing_table.setSortingEnabled(True)
         self.billing_total_label.setText(
             f"Parts Total: {format_currency(grand_total)}"
+            if self._can_see_dollars
+            else "Parts Total: \u2014"
         )
         self.billing_hours_label.setText(f"Total Hours: {grand_hours:.2f}")
 

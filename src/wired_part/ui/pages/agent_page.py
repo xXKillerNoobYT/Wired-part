@@ -52,11 +52,8 @@ class AgentPage(QWidget):
         self._try_connect()
 
     def set_agent_manager(self, manager):
-        """Set reference to the background AgentManager."""
+        """Set reference to the background AgentManager (kept for compat)."""
         self._agent_manager = manager
-        if manager:
-            manager.agent_completed.connect(self._on_bg_agent_done)
-            manager.agent_error.connect(self._on_bg_agent_error)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -67,6 +64,8 @@ class AgentPage(QWidget):
         header.addStretch()
 
         self.status_label = QLabel("Disconnected")
+        self.status_label.setObjectName("AgentConnectionLabel")
+        self.status_label.setProperty("status", "disconnected")
         header.addWidget(self.status_label)
 
         self.connect_btn = QPushButton("Connect")
@@ -104,60 +103,6 @@ class AgentPage(QWidget):
 
         layout.addLayout(model_row)
 
-        # Background agents status panel
-        bg_group = QGroupBox("Background Agents")
-        bg_layout = QVBoxLayout()
-
-        agents_row = QHBoxLayout()
-
-        # Audit agent
-        audit_col = QVBoxLayout()
-        audit_col.addWidget(QLabel("Audit Agent"))
-        self.audit_status = QLabel("Idle")
-        self.audit_status.setStyleSheet("color: #6c7086;")
-        audit_col.addWidget(self.audit_status)
-        audit_run = QPushButton("Run Now")
-        audit_run.clicked.connect(lambda: self._run_bg_agent("audit_agent"))
-        audit_col.addWidget(audit_run)
-        agents_row.addLayout(audit_col)
-
-        # Admin agent
-        admin_col = QVBoxLayout()
-        admin_col.addWidget(QLabel("Admin Helper"))
-        self.admin_status = QLabel("Idle")
-        self.admin_status.setStyleSheet("color: #6c7086;")
-        admin_col.addWidget(self.admin_status)
-        admin_run = QPushButton("Run Now")
-        admin_run.clicked.connect(lambda: self._run_bg_agent("admin_agent"))
-        admin_col.addWidget(admin_run)
-        agents_row.addLayout(admin_col)
-
-        # Reminder agent
-        reminder_col = QVBoxLayout()
-        reminder_col.addWidget(QLabel("Reminder Agent"))
-        self.reminder_status = QLabel("Idle")
-        self.reminder_status.setStyleSheet("color: #6c7086;")
-        reminder_col.addWidget(self.reminder_status)
-        reminder_run = QPushButton("Run Now")
-        reminder_run.clicked.connect(
-            lambda: self._run_bg_agent("reminder_agent")
-        )
-        reminder_col.addWidget(reminder_run)
-        agents_row.addLayout(reminder_col)
-
-        bg_layout.addLayout(agents_row)
-
-        # Enable/disable toggle
-        toggle_row = QHBoxLayout()
-        self.bg_toggle_btn = QPushButton("Start Background Agents")
-        self.bg_toggle_btn.clicked.connect(self._toggle_bg_agents)
-        toggle_row.addWidget(self.bg_toggle_btn)
-        toggle_row.addStretch()
-        bg_layout.addLayout(toggle_row)
-
-        bg_group.setLayout(bg_layout)
-        layout.addWidget(bg_group)
-
         # Chat display
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
@@ -190,7 +135,7 @@ class AgentPage(QWidget):
         self.connection_label = QLabel(
             f"LM Studio @ {Config.LM_STUDIO_BASE_URL}"
         )
-        self.connection_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.connection_label.setObjectName("AgentConnectionInfo")
         layout.addWidget(self.connection_label)
 
     def refresh(self):
@@ -200,9 +145,14 @@ class AgentPage(QWidget):
             f"LM Studio @ {Config.LM_STUDIO_BASE_URL}  |  "
             f"Model: {Config.LM_STUDIO_MODEL}"
         )
-        # Sync the model combo if the model was changed in Settings
-        if self.model_combo.currentText() != Config.LM_STUDIO_MODEL:
-            self.model_combo.setCurrentText(Config.LM_STUDIO_MODEL)
+        # Sync the model combo if the model was changed in Settings.
+        # Ensure the configured model is in the combo list first —
+        # setCurrentText() silently fails if the text isn't in the list.
+        configured = Config.LM_STUDIO_MODEL
+        if self.model_combo.findText(configured) < 0:
+            self.model_combo.insertItem(0, configured)
+        if self.model_combo.currentText() != configured:
+            self.model_combo.setCurrentText(configured)
 
         # Auto-reconnect if config changed since last connect
         current_url = Config.LM_STUDIO_BASE_URL
@@ -211,7 +161,6 @@ class AgentPage(QWidget):
             self._try_connect()
         else:
             self._check_connection()
-        self._update_bg_status()
 
     def _try_connect(self):
         """Initialize or reconnect the LLM client."""
@@ -225,14 +174,15 @@ class AgentPage(QWidget):
         """Update the connection status label."""
         if self.client and self.client.is_connected():
             self.status_label.setText("Connected")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.status_label.setProperty("status", "connected")
             self.send_btn.setEnabled(True)
             self.message_input.setEnabled(True)
         else:
             self.status_label.setText("Disconnected")
-            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.status_label.setProperty("status", "disconnected")
             self.send_btn.setEnabled(False)
             self.message_input.setEnabled(False)
+        self.status_label.style().polish(self.status_label)
 
     def _fetch_and_populate_models(self):
         """Fetch available models from the LLM server and populate combo."""
@@ -348,77 +298,3 @@ class AgentPage(QWidget):
             "<b>Agent:</b> Chat cleared. How can I help?"
         )
 
-    # ── Background agent controls ────────────────────────────
-
-    def _run_bg_agent(self, agent_name: str):
-        """Manually trigger a background agent."""
-        if not self._agent_manager:
-            return
-        status_label = self._get_status_label(agent_name)
-        if status_label:
-            status_label.setText("Running...")
-            status_label.setStyleSheet("color: #fab387;")
-        self._agent_manager.run_now(agent_name)
-
-    def _toggle_bg_agents(self):
-        """Start or stop the background agents."""
-        if not self._agent_manager:
-            return
-        if self._agent_manager.enabled:
-            self._agent_manager.stop()
-            self.bg_toggle_btn.setText("Start Background Agents")
-        else:
-            self._agent_manager.start()
-            self.bg_toggle_btn.setText("Stop Background Agents")
-        self._update_bg_status()
-
-    def _update_bg_status(self):
-        """Refresh the status labels for each background agent."""
-        if not self._agent_manager:
-            return
-        for name in ("audit_agent", "admin_agent", "reminder_agent"):
-            label = self._get_status_label(name)
-            if not label:
-                continue
-            if self._agent_manager.is_running(name):
-                label.setText("Running...")
-                label.setStyleSheet("color: #fab387;")
-            else:
-                result = self._agent_manager.get_last_result(name)
-                if result.startswith("Error:"):
-                    label.setText("Error")
-                    label.setStyleSheet("color: #f38ba8;")
-                elif result == "Not run yet":
-                    label.setText("Idle")
-                    label.setStyleSheet("color: #6c7086;")
-                else:
-                    label.setText("Completed")
-                    label.setStyleSheet("color: #a6e3a1;")
-
-        if self._agent_manager.enabled:
-            self.bg_toggle_btn.setText("Stop Background Agents")
-        else:
-            self.bg_toggle_btn.setText("Start Background Agents")
-
-    def _on_bg_agent_done(self, agent_name: str, result: str):
-        """Handle background agent completion."""
-        label = self._get_status_label(agent_name)
-        if label:
-            label.setText("Completed")
-            label.setStyleSheet("color: #a6e3a1;")
-
-    def _on_bg_agent_error(self, agent_name: str, error: str):
-        """Handle background agent error."""
-        label = self._get_status_label(agent_name)
-        if label:
-            label.setText("Error")
-            label.setStyleSheet("color: #f38ba8;")
-            label.setToolTip(error)
-
-    def _get_status_label(self, agent_name: str) -> QLabel | None:
-        labels = {
-            "audit_agent": self.audit_status,
-            "admin_agent": self.admin_status,
-            "reminder_agent": self.reminder_status,
-        }
-        return labels.get(agent_name)

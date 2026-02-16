@@ -31,6 +31,9 @@ class IncomingPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
         self._orders = []
         self._current_order = None
         self._items = []
@@ -136,6 +139,7 @@ class IncomingPage(QWidget):
         )
         self.receive_btn.clicked.connect(self._on_receive)
         self.receive_btn.setEnabled(False)
+        self.receive_btn.setVisible("orders_receive" in self._perms)
         btn_row.addWidget(self.receive_btn)
 
         right_layout.addLayout(btn_row)

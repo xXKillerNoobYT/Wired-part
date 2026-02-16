@@ -78,6 +78,9 @@ class LaborPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
         self._entries: list[LaborEntry] = []
         self._setup_ui()
         self.refresh()
@@ -143,6 +146,10 @@ class LaborPage(QWidget):
         self.clock_out_btn = QPushButton("Clock Out")
         self.clock_out_btn.clicked.connect(self._on_clock_out)
         toolbar.addWidget(self.clock_out_btn)
+
+        # Apply permission visibility
+        self.clock_in_btn.setVisible("labor_clock_in" in self._perms)
+        self.clock_out_btn.setVisible("labor_clock_out" in self._perms)
 
         layout.addLayout(toolbar)
 

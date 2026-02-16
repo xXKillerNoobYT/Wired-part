@@ -53,7 +53,7 @@ class TestConfigDefaults:
     """Verify default configuration values."""
 
     def test_app_theme_default(self):
-        assert Config.APP_THEME in ("dark", "light")
+        assert Config.APP_THEME in ("dark", "light", "retro")
 
     def test_geofence_radius_is_float(self):
         assert isinstance(Config.GEOFENCE_RADIUS, float)

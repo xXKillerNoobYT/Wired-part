@@ -274,7 +274,7 @@ class TestOrderStatusWorkflow:
 
     def test_close_order(self, repo, draft_order):
         repo.submit_purchase_order(draft_order.id)
-        repo.close_purchase_order(draft_order.id)
+        repo.close_purchase_order(draft_order.id, force=True)
         order = repo.get_purchase_order_by_id(draft_order.id)
         assert order.status == "closed"
         assert order.closed_at is not None

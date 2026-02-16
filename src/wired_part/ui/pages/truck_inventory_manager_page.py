@@ -39,6 +39,10 @@ class TruckInventoryManagerPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._items: list[TruckInventory] = []
         self._setup_ui()
         self._load_trucks()
@@ -198,7 +202,10 @@ class TruckInventoryManagerPage(QWidget):
                 self._num_item(item.quantity),
                 self._num_item(item.min_quantity),
                 self._num_item(item.max_quantity),
-                QTableWidgetItem(format_currency(item.unit_cost)),
+                QTableWidgetItem(
+                    format_currency(item.unit_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(status_text),
             ]
 
@@ -211,9 +218,13 @@ class TruckInventoryManagerPage(QWidget):
 
         self.table.setSortingEnabled(True)
 
+        value_str = (
+            format_currency(total_value)
+            if self._can_see_dollars else "\u2014"
+        )
         self.summary_label.setText(
             f"{len(items)} parts  |  "
-            f"Value: {format_currency(total_value)}  |  "
+            f"Value: {value_str}  |  "
             f"Under: {under_count}  |  Over: {over_count}"
         )
 

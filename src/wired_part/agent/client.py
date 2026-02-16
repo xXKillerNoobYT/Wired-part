@@ -15,12 +15,13 @@ class LMStudioClient:
     """Chat client that connects to a local LM Studio instance."""
 
     def __init__(self, tool_executor: Callable[[str, str], str]):
+        read_timeout = float(max(Config.LM_STUDIO_TIMEOUT, 120))
         self.client = OpenAI(
             base_url=Config.LM_STUDIO_BASE_URL,
             api_key=Config.LM_STUDIO_API_KEY,
             timeout=httpx.Timeout(
-                connect=10.0,
-                read=float(Config.LM_STUDIO_TIMEOUT),
+                connect=30.0,
+                read=read_timeout,
                 write=300.0,
                 pool=300.0,
             ),

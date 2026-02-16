@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -79,6 +80,9 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
         self._setup_ui()
         self.refresh()
 
@@ -86,64 +90,146 @@ class SettingsPage(QWidget):
         layout = QVBoxLayout(self)
 
         title = QLabel("Settings")
-        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        title.setObjectName("PageTitle")
         layout.addWidget(title)
 
-        self.sub_tabs = QTabWidget()
-        layout.addWidget(self.sub_tabs)
+        # Section selector (QComboBox + QStackedWidget)
+        section_row = QHBoxLayout()
+        section_row.addWidget(QLabel("Section:"))
+        self.section_combo = QComboBox()
+        self.section_combo.setMinimumWidth(200)
+        section_row.addWidget(self.section_combo)
+        section_row.addStretch()
+        layout.addLayout(section_row)
 
-        # Users tab
-        self.users_widget = QWidget()
-        self._setup_users_tab()
-        self.sub_tabs.addTab(self.users_widget, "Users")
+        self.section_stack = QStackedWidget()
+        layout.addWidget(self.section_stack)
 
-        # Hats tab
-        self.hats_widget = QWidget()
-        self._setup_hats_tab()
-        self.sub_tabs.addTab(self.hats_widget, "Hats & Permissions")
+        # ── Section 0: App Settings ────────────────────────────
+        self.app_settings_tabs = QTabWidget()
 
-        # Categories tab
-        self.categories_widget = QWidget()
-        self._setup_categories_tab()
-        self.sub_tabs.addTab(self.categories_widget, "Categories")
-
-        # Suppliers tab
-        self.suppliers_widget = QWidget()
-        self._setup_suppliers_tab()
-        self.sub_tabs.addTab(self.suppliers_widget, "Suppliers")
-
-        # LLM Settings tab
-        self.llm_widget = QWidget()
-        self._setup_llm_tab()
-        self.sub_tabs.addTab(self.llm_widget, "LLM Settings")
-
-        # Agent Config tab
-        self.agent_config_widget = QWidget()
-        self._setup_agent_config_tab()
-        self.sub_tabs.addTab(self.agent_config_widget, "Agent Config")
-
-        # Labor tab
-        self.labor_widget = QWidget()
-        self._setup_labor_tab()
-        self.sub_tabs.addTab(self.labor_widget, "Labor")
-
-        # Job Customizations tab (notebook template + BRO categories)
-        self.notebook_widget = QWidget()
-        self._setup_job_customizations_tab()
-        self.sub_tabs.addTab(self.notebook_widget, "Job Customizations")
-
-        # General tab
         self.general_widget = QWidget()
         self._setup_general_tab()
-        self.sub_tabs.addTab(self.general_widget, "General")
+        self.app_settings_tabs.addTab(self.general_widget, "General")
+
+        self.labor_widget = QWidget()
+        self._setup_labor_tab()
+        self.app_settings_tabs.addTab(self.labor_widget, "Labor")
+
+        self.notebook_widget = QWidget()
+        self._setup_job_customizations_tab()
+        self.app_settings_tabs.addTab(self.notebook_widget, "Job Customizations")
+
+        self.llm_widget = QWidget()
+        self._setup_llm_tab()
+        self.app_settings_tabs.addTab(self.llm_widget, "LLM Settings")
+
+        self.agent_config_widget = QWidget()
+        self._setup_agent_config_tab()
+        self.app_settings_tabs.addTab(self.agent_config_widget, "Agent Config")
+
+        self.section_stack.addWidget(self.app_settings_tabs)
+
+        # ── Section 1: Team Settings ───────────────────────────
+        self.team_settings_tabs = QTabWidget()
+
+        self.users_widget = QWidget()
+        self._setup_users_tab()
+        self.team_settings_tabs.addTab(self.users_widget, "Users")
+
+        self.hats_widget = QWidget()
+        self._setup_hats_tab()
+        self.team_settings_tabs.addTab(self.hats_widget, "Hats & Permissions")
+
+        self.categories_widget = QWidget()
+        self._setup_categories_tab()
+        self.team_settings_tabs.addTab(self.categories_widget, "Categories")
+
+        self.suppliers_widget = QWidget()
+        self._setup_suppliers_tab()
+        self.team_settings_tabs.addTab(self.suppliers_widget, "Suppliers")
+
+        self.section_stack.addWidget(self.team_settings_tabs)
+
+        # ── Section 2: My Settings ─────────────────────────────
+        self.my_settings_widget = QWidget()
+        self._setup_my_settings()
+        self.section_stack.addWidget(self.my_settings_widget)
+
+        # Wire section combo
+        self.section_combo.currentIndexChanged.connect(
+            self._on_section_changed
+        )
+
+        # Apply permission visibility — build combo entries
+        p = self._perms
+        self._section_indices: list[int] = []  # stack index per combo item
+
+        # App Settings — visible if user has ANY app settings perm
+        app_perms = {
+            "settings_general", "settings_labor", "settings_notebook",
+            "settings_llm", "settings_agent",
+        }
+        if p & app_perms:
+            self.section_combo.addItem("App Settings")
+            self._section_indices.append(0)
+            # Hide individual tabs within App Settings based on perms
+            _app_perm_map = {
+                0: "settings_general",
+                1: "settings_labor",
+                2: "settings_notebook",
+                3: "settings_llm",
+                4: "settings_agent",
+            }
+            for idx, perm in _app_perm_map.items():
+                if idx < self.app_settings_tabs.count():
+                    self.app_settings_tabs.setTabVisible(idx, perm in p)
+
+        # Team Settings — visible if user has ANY team settings perm
+        team_perms = {
+            "settings_users", "settings_hats",
+            "settings_categories", "settings_suppliers",
+        }
+        if p & team_perms:
+            self.section_combo.addItem("Team Settings")
+            self._section_indices.append(1)
+            _team_perm_map = {
+                0: "settings_users",
+                1: "settings_hats",
+                2: "settings_categories",
+                3: "settings_suppliers",
+            }
+            for idx, perm in _team_perm_map.items():
+                if idx < self.team_settings_tabs.count():
+                    self.team_settings_tabs.setTabVisible(idx, perm in p)
+
+        # My Settings — ALWAYS visible to everyone
+        self.section_combo.addItem("My Settings")
+        self._section_indices.append(2)
+
+        # Default to the first available section
+        if self._section_indices:
+            self.section_stack.setCurrentIndex(self._section_indices[0])
+
+        # Backward-compat: expose sub_tabs for tests/permissions that reference it
+        # Points to the currently visible inner QTabWidget
+        self.sub_tabs = self.app_settings_tabs
 
         # Auto-fetch models when LLM tab is first opened
         self._llm_models_fetched = False
-        self.sub_tabs.currentChanged.connect(self._on_settings_tab_changed)
+        self.app_settings_tabs.currentChanged.connect(
+            self._on_settings_tab_changed
+        )
+
+    def _on_section_changed(self, combo_index: int):
+        """Switch the settings section based on combo selection."""
+        if combo_index < len(self._section_indices):
+            stack_idx = self._section_indices[combo_index]
+            self.section_stack.setCurrentIndex(stack_idx)
 
     def _on_settings_tab_changed(self, index: int):
         """Auto-fetch models when LLM tab is first opened."""
-        if self.sub_tabs.widget(index) is self.llm_widget:
+        if self.app_settings_tabs.widget(index) is self.llm_widget:
             if not self._llm_models_fetched:
                 self._llm_models_fetched = True
                 self._fetch_models()
@@ -1539,6 +1625,7 @@ class SettingsPage(QWidget):
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Retro", "retro")
         idx = self.theme_combo.findData(Config.APP_THEME)
         if idx >= 0:
             self.theme_combo.setCurrentIndex(idx)
@@ -1702,6 +1789,200 @@ class SettingsPage(QWidget):
         Config.update_order_settings(po_prefix, ra_prefix, auto_close)
         self.order_status.setText("Order settings saved successfully.")
         self.order_status.setStyleSheet("color: #a6e3a1;")
+
+    # ── My Settings ──────────────────────────────────────────────
+
+    def _setup_my_settings(self):
+        """Per-user preferences — visible to every user."""
+        from wired_part.config import Config
+        from pathlib import Path
+
+        layout = QVBoxLayout(self.my_settings_widget)
+
+        # Theme
+        theme_group = QGroupBox("Appearance")
+        theme_form = QFormLayout()
+
+        self.my_theme_combo = QComboBox()
+        self.my_theme_combo.addItem("Dark", "dark")
+        self.my_theme_combo.addItem("Light", "light")
+        self.my_theme_combo.addItem("Retro", "retro")
+
+        # Load current user setting
+        settings = self.repo.get_or_create_user_settings(
+            self.current_user.id
+        )
+        idx = self.my_theme_combo.findData(settings.theme or "dark")
+        if idx >= 0:
+            self.my_theme_combo.setCurrentIndex(idx)
+
+        theme_form.addRow("Theme:", self.my_theme_combo)
+
+        # Font size
+        self.my_font_spin = QSpinBox()
+        self.my_font_spin.setRange(8, 16)
+        self.my_font_spin.setValue(settings.font_size or 10)
+        theme_form.addRow("Font Size:", self.my_font_spin)
+
+        # Compact mode
+        self.my_compact_check = QCheckBox("Compact mode (smaller spacing)")
+        self.my_compact_check.setChecked(bool(settings.compact_mode))
+        theme_form.addRow("", self.my_compact_check)
+
+        theme_group.setLayout(theme_form)
+        layout.addWidget(theme_group)
+
+        # Defaults
+        defaults_group = QGroupBox("Defaults")
+        defaults_form = QFormLayout()
+
+        self.my_truck_filter_combo = QComboBox()
+        self.my_truck_filter_combo.addItem("My Truck", "mine")
+        self.my_truck_filter_combo.addItem("All Trucks", "all")
+        tf_idx = self.my_truck_filter_combo.findData(
+            settings.default_truck_filter or "mine"
+        )
+        if tf_idx >= 0:
+            self.my_truck_filter_combo.setCurrentIndex(tf_idx)
+        defaults_form.addRow("Default Truck Filter:", self.my_truck_filter_combo)
+
+        self.my_date_range_combo = QComboBox()
+        for label in (
+            "This Period", "Last 7 Days", "Last 30 Days",
+            "This Month", "All Time",
+        ):
+            self.my_date_range_combo.addItem(label)
+        dr_idx = self.my_date_range_combo.findText(
+            settings.preferred_date_range or "This Period"
+        )
+        if dr_idx >= 0:
+            self.my_date_range_combo.setCurrentIndex(dr_idx)
+        defaults_form.addRow("Preferred Date Range:", self.my_date_range_combo)
+
+        defaults_group.setLayout(defaults_form)
+        layout.addWidget(defaults_group)
+
+        # Account
+        account_group = QGroupBox("Account")
+        account_form = QFormLayout()
+
+        self.my_display_name = QLineEdit(
+            self.current_user.display_name or ""
+        )
+        account_form.addRow("Display Name:", self.my_display_name)
+
+        self.my_pin_current = QLineEdit()
+        self.my_pin_current.setEchoMode(QLineEdit.EchoMode.Password)
+        self.my_pin_current.setPlaceholderText("Current PIN")
+        account_form.addRow("Current PIN:", self.my_pin_current)
+
+        self.my_pin_new = QLineEdit()
+        self.my_pin_new.setEchoMode(QLineEdit.EchoMode.Password)
+        self.my_pin_new.setPlaceholderText("New PIN (leave blank to keep)")
+        account_form.addRow("New PIN:", self.my_pin_new)
+
+        self.my_pin_confirm = QLineEdit()
+        self.my_pin_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self.my_pin_confirm.setPlaceholderText("Confirm new PIN")
+        account_form.addRow("Confirm PIN:", self.my_pin_confirm)
+
+        account_group.setLayout(account_form)
+        layout.addWidget(account_group)
+
+        # Save button
+        save_btn = QPushButton("Save My Settings")
+        save_btn.setMinimumHeight(34)
+        save_btn.clicked.connect(self._save_my_settings)
+        layout.addWidget(save_btn)
+
+        self.my_settings_status = QLabel("")
+        self.my_settings_status.setObjectName("SettingsStatusLabel")
+        layout.addWidget(self.my_settings_status)
+
+        layout.addStretch()
+
+    def _save_my_settings(self):
+        """Persist the user's personal preferences."""
+        from wired_part.config import Config
+
+        theme = self.my_theme_combo.currentData()
+        font_size = self.my_font_spin.value()
+        compact = 1 if self.my_compact_check.isChecked() else 0
+        truck_filter = self.my_truck_filter_combo.currentData()
+        date_range = self.my_date_range_combo.currentText()
+        display_name = self.my_display_name.text().strip()
+
+        # Validate display name
+        if not display_name:
+            self.my_settings_status.setText("Display name cannot be empty.")
+            return
+
+        # Handle PIN change
+        new_pin = self.my_pin_new.text().strip()
+        if new_pin:
+            current = self.my_pin_current.text().strip()
+            if not current:
+                self.my_settings_status.setText(
+                    "Enter current PIN to change it."
+                )
+                return
+            if Repository.hash_pin(current) != self.current_user.pin_hash:
+                self.my_settings_status.setText("Current PIN is incorrect.")
+                return
+            confirm = self.my_pin_confirm.text().strip()
+            if new_pin != confirm:
+                self.my_settings_status.setText("New PINs do not match.")
+                return
+            if len(new_pin) < 4:
+                self.my_settings_status.setText(
+                    "PIN must be at least 4 digits."
+                )
+                return
+            self.current_user.pin_hash = Repository.hash_pin(new_pin)
+            self.my_pin_current.clear()
+            self.my_pin_new.clear()
+            self.my_pin_confirm.clear()
+
+        # Update display name and/or PIN via full User update
+        user_changed = False
+        if display_name != self.current_user.display_name:
+            self.current_user.display_name = display_name
+            user_changed = True
+        if new_pin:
+            user_changed = True  # pin_hash already updated above
+        if user_changed:
+            self.repo.update_user(self.current_user)
+
+        # Save user_settings
+        self.repo.update_user_settings(
+            self.current_user.id,
+            theme=theme,
+            font_size=font_size,
+            compact_mode=compact,
+            default_truck_filter=truck_filter,
+            preferred_date_range=date_range,
+        )
+
+        # Live-apply theme
+        from pathlib import Path
+        from wired_part.utils.platform import get_font_family
+        qss_file = (
+            Path(__file__).parent.parent / "styles" / f"{theme}.qss"
+        )
+        if qss_file.exists():
+            from PySide6.QtWidgets import QApplication
+            qss = qss_file.read_text(encoding="utf-8")
+            qss = qss.replace("{{FONT_FAMILY}}", get_font_family())
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(qss)
+
+        # Also update global Config.APP_THEME so refresh() picks it up
+        Config.update_theme(theme)
+
+        self.my_settings_status.setText(
+            "Settings saved. Theme applied."
+        )
 
     # ── Refresh ─────────────────────────────────────────────────
 

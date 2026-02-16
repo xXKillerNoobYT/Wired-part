@@ -1,6 +1,6 @@
 """Dashboard page — overview of inventory, jobs, trucks, notifications."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -24,16 +25,13 @@ class SummaryCard(QFrame):
 
     def __init__(self, title: str, value: str = "0", parent=None):
         super().__init__(parent)
+        self.setObjectName("SummaryCard")
         self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "SummaryCard { border: 1px solid #45475a; border-radius: 8px; "
-            "padding: 12px; }"
-        )
         layout = QVBoxLayout(self)
         self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("color: #6c7086; font-size: 12px;")
+        self.title_label.setObjectName("SummaryCardTitle")
         self.value_label = QLabel(value)
-        self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.value_label.setObjectName("SummaryCardValue")
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
 
@@ -44,10 +42,18 @@ class SummaryCard(QFrame):
 class DashboardPage(QWidget):
     """Main dashboard with summary cards, personal info, and alerts."""
 
+    # Signal emitted when user wants to navigate to a specific tab
+    navigate_to_tab = Signal(int)
+
     def __init__(self, repo: Repository, current_user: User, parent=None):
         super().__init__(parent)
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._active_entry_id = None
+        self._active_job_id = None
         self._setup_ui()
         self.refresh()
 
@@ -55,8 +61,10 @@ class DashboardPage(QWidget):
         layout = QVBoxLayout(self)
 
         # Title with user greeting
-        title = QLabel(f"Dashboard — Welcome, {self.current_user.display_name}")
-        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        title = QLabel(
+            f"Dashboard -- Welcome, {self.current_user.display_name}"
+        )
+        title.setObjectName("PageTitle")
         layout.addWidget(title)
 
         # Summary cards row
@@ -76,6 +84,11 @@ class DashboardPage(QWidget):
         cards_layout.addWidget(self.value_card, 0, 1)
         cards_layout.addWidget(self.low_stock_card, 0, 2)
         cards_layout.addWidget(self.hours_card, 0, 3)
+
+        # Inventory Value is admin-level info -- hide if no permission
+        self.value_card.setVisible(
+            "show_dollar_values" in self._perms
+        )
         cards_layout.addWidget(self.jobs_card, 1, 0)
         cards_layout.addWidget(self.trucks_card, 1, 1)
         cards_layout.addWidget(self.pending_card, 1, 2)
@@ -84,15 +97,31 @@ class DashboardPage(QWidget):
 
         layout.addLayout(cards_layout)
 
-        # Middle section: My Active Jobs + My Truck
+        # Middle section: My Active Jobs + My Truck + Currently Clocked In
         middle = QHBoxLayout()
 
-        # My active jobs
+        # My active jobs -- clickable for clock-in
         my_jobs_group = QGroupBox("My Active Jobs")
         my_jobs_layout = QVBoxLayout(my_jobs_group)
+
         self.my_jobs_list = QListWidget()
-        self.my_jobs_list.setMaximumHeight(180)
+        self.my_jobs_list.setMaximumHeight(150)
+        self.my_jobs_list.setToolTip(
+            "Select a job and click Clock In below"
+        )
         my_jobs_layout.addWidget(self.my_jobs_list)
+
+        # Clock In button -- select a job from the list above
+        self.clock_in_btn = QPushButton("Clock In to Selected Job")
+        self.clock_in_btn.setToolTip(
+            "Select a job above, then click to clock in"
+        )
+        self.clock_in_btn.clicked.connect(self._on_clock_in)
+        self.clock_in_btn.setEnabled(False)
+        my_jobs_layout.addWidget(self.clock_in_btn)
+        self.my_jobs_list.currentItemChanged.connect(
+            self._on_my_job_selection_changed
+        )
         middle.addWidget(my_jobs_group)
 
         # My truck
@@ -115,10 +144,31 @@ class DashboardPage(QWidget):
         self.clock_status_label.setStyleSheet("padding: 8px;")
         clock_layout.addWidget(self.clock_status_label)
 
+        # Action buttons for the active clock-in job
+        btn_row = QVBoxLayout()
+
         self.quick_clock_out_btn = QPushButton("Quick Clock Out")
         self.quick_clock_out_btn.clicked.connect(self._on_quick_clock_out)
         self.quick_clock_out_btn.setEnabled(False)
-        clock_layout.addWidget(self.quick_clock_out_btn)
+        btn_row.addWidget(self.quick_clock_out_btn)
+
+        self.make_order_btn = QPushButton("Make Order for This Job")
+        self.make_order_btn.setToolTip(
+            "Create a purchase order for the job you're clocked into"
+        )
+        self.make_order_btn.clicked.connect(self._on_make_order)
+        self.make_order_btn.setEnabled(False)
+        btn_row.addWidget(self.make_order_btn)
+
+        self.job_notes_btn = QPushButton("Job Notes")
+        self.job_notes_btn.setToolTip(
+            "Open notes for the job you're clocked into"
+        )
+        self.job_notes_btn.clicked.connect(self._on_job_notes)
+        self.job_notes_btn.setEnabled(False)
+        btn_row.addWidget(self.job_notes_btn)
+
+        clock_layout.addLayout(btn_row)
         middle.addWidget(clock_group)
 
         layout.addLayout(middle)
@@ -144,6 +194,12 @@ class DashboardPage(QWidget):
 
         layout.addLayout(bottom)
         layout.addStretch()
+
+    def _on_my_job_selection_changed(self, current, previous):
+        """Enable/disable Clock In based on job list selection."""
+        has_selection = current is not None
+        not_clocked_in = self._active_entry_id is None
+        self.clock_in_btn.setEnabled(has_selection and not_clocked_in)
 
     def refresh(self):
         # Inventory summary
@@ -189,11 +245,22 @@ class DashboardPage(QWidget):
                 f"<b>Since:</b> {str(active_entry.start_time)[:16]}"
             )
             self.quick_clock_out_btn.setEnabled(True)
+            self.make_order_btn.setEnabled(True)
+            self.job_notes_btn.setEnabled(True)
+            self.clock_in_btn.setEnabled(False)
             self._active_entry_id = active_entry.id
+            self._active_job_id = active_entry.job_id
         else:
             self.clock_status_label.setText("Not clocked in")
             self.quick_clock_out_btn.setEnabled(False)
+            self.make_order_btn.setEnabled(False)
+            self.job_notes_btn.setEnabled(False)
             self._active_entry_id = None
+            self._active_job_id = None
+            # Re-evaluate clock-in button based on selection
+            self._on_my_job_selection_changed(
+                self.my_jobs_list.currentItem(), None
+            )
 
         # My Active Jobs
         self.my_jobs_list.clear()
@@ -212,8 +279,9 @@ class DashboardPage(QWidget):
                     "worker",
                 )
                 item = QListWidgetItem(
-                    f"{job.job_number} — {job.name} [{my_role.title()}]"
+                    f"{job.job_number} -- {job.name} [{my_role.title()}]"
                 )
+                item.setData(Qt.ItemDataRole.UserRole, job.id)
                 self.my_jobs_list.addItem(item)
         else:
             self.my_jobs_list.addItem("No active job assignments")
@@ -227,7 +295,7 @@ class DashboardPage(QWidget):
                 break
         if my_truck:
             self.my_truck_label.setText(
-                f"<b>{my_truck.truck_number}</b> — {my_truck.name}"
+                f"<b>{my_truck.truck_number}</b> -- {my_truck.name}"
             )
             truck_inv = self.repo.get_truck_inventory(my_truck.id)
             if truck_inv:
@@ -237,7 +305,6 @@ class DashboardPage(QWidget):
                     )
             else:
                 self.truck_inv_list.addItem("No parts on truck")
-            # Show pending transfers for my truck
             my_pending = self.repo.get_truck_transfers(
                 my_truck.id, status="pending"
             )
@@ -261,7 +328,7 @@ class DashboardPage(QWidget):
             else:
                 self.orders_card.title_label.setText("Pending Orders")
         except Exception:
-            self.orders_card.set_value("—")
+            self.orders_card.set_value("--")
 
         # Open returns
         try:
@@ -272,7 +339,7 @@ class DashboardPage(QWidget):
             ]
             self.returns_card.set_value(str(len(active_returns)))
         except Exception:
-            self.returns_card.set_value("—")
+            self.returns_card.set_value("--")
 
         # Notifications
         self.notif_list.clear()
@@ -302,6 +369,39 @@ class DashboardPage(QWidget):
         else:
             self.alerts_list.addItem("All stock levels are healthy")
 
+    def _on_clock_in(self):
+        """Clock in to the selected job from the My Active Jobs list."""
+        item = self.my_jobs_list.currentItem()
+        if not item:
+            QMessageBox.warning(
+                self, "No Job Selected",
+                "Please select a job from your active jobs list."
+            )
+            return
+
+        job_id = item.data(Qt.ItemDataRole.UserRole)
+        if not job_id:
+            return
+
+        # Double-check not already clocked in
+        active = self.repo.get_active_clock_in(self.current_user.id)
+        if active:
+            QMessageBox.warning(
+                self, "Already Clocked In",
+                f"You are already clocked in to "
+                f"{active.job_number or 'a job'}.\n"
+                "Please clock out first.",
+            )
+            return
+
+        from wired_part.ui.dialogs.clock_dialog import ClockInDialog
+        dialog = ClockInDialog(
+            self.repo, self.current_user.id,
+            job_id=job_id, parent=self
+        )
+        if dialog.exec():
+            self.refresh()
+
     def _on_quick_clock_out(self):
         """Quick clock out from the dashboard."""
         if not self._active_entry_id:
@@ -312,3 +412,32 @@ class DashboardPage(QWidget):
         )
         if dialog.exec():
             self.refresh()
+
+    def _on_make_order(self):
+        """Open order dialog for the job the user is clocked into."""
+        if not self._active_job_id:
+            return
+        from wired_part.ui.dialogs.order_dialog import OrderDialog
+        job = self.repo.get_job_by_id(self._active_job_id)
+        if not job:
+            return
+        dialog = OrderDialog(self.repo, job_id=job.id, parent=self)
+        if dialog.exec():
+            QMessageBox.information(
+                self, "Order Created",
+                f"Purchase order created for {job.job_number}."
+            )
+            self.refresh()
+
+    def _on_job_notes(self):
+        """Open notebook dialog for the job the user is clocked into."""
+        if not self._active_job_id:
+            return
+        from wired_part.ui.dialogs.notebook_dialog import NotebookDialog
+        job = self.repo.get_job_by_id(self._active_job_id)
+        if not job:
+            return
+        dialog = NotebookDialog(
+            self.repo, job_id=job.id, parent=self
+        )
+        dialog.exec()

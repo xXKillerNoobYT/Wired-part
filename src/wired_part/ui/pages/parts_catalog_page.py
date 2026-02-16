@@ -109,6 +109,7 @@ class CatalogSubPage(QWidget):
         self._perms: set[str] = set()
         if current_user:
             self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._setup_ui()
         self.refresh()
 
@@ -470,7 +471,14 @@ class CatalogSubPage(QWidget):
                 QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self.repo.delete_part(part_id)
+                try:
+                    self.repo.delete_part(part_id, force=True)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Cannot Delete",
+                        f"Failed to delete part: {exc}",
+                    )
+                    return
                 self.refresh()
             return
 
@@ -511,7 +519,14 @@ class CatalogSubPage(QWidget):
                 QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self.repo.delete_part(part_id)
+                try:
+                    self.repo.delete_part(part_id, force=True)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Cannot Delete",
+                        f"Failed to delete part: {exc}",
+                    )
+                    return
                 self.refresh()
             return
 
@@ -585,8 +600,14 @@ class CatalogSubPage(QWidget):
                 self._num_item(entry["truck_qty"]),
                 self._num_item(entry["job_qty"]),
                 self._num_item(total_qty),
-                QTableWidgetItem(format_currency(entry["unit_cost"])),
-                QTableWidgetItem(format_currency(row_value)),
+                QTableWidgetItem(
+                    format_currency(entry["unit_cost"])
+                    if self._can_see_dollars else "—"
+                ),
+                QTableWidgetItem(
+                    format_currency(row_value)
+                    if self._can_see_dollars else "—"
+                ),
                 QTableWidgetItem(entry["qty_window"]),
                 QTableWidgetItem(locations_str),
             ]
@@ -637,10 +658,13 @@ class CatalogSubPage(QWidget):
                 self.table.setItem(row, col, item)
 
         self.table.setSortingEnabled(True)
-        self.summary_label.setText(
-            f"{total_parts} parts  |  "
-            f"Total Value: {format_currency(total_value)}"
-        )
+        if self._can_see_dollars:
+            self.summary_label.setText(
+                f"{total_parts} parts  |  "
+                f"Total Value: {format_currency(total_value)}"
+            )
+        else:
+            self.summary_label.setText(f"{total_parts} parts")
 
         if incomplete_count > 0:
             self.incomplete_label.setText(

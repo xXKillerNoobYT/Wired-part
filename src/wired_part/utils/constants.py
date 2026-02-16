@@ -17,7 +17,10 @@ ACTIVITY_ENTITY_TYPES = [
     "user", "truck", "category", "supplier", "notebook",
 ]
 
-JOB_UPDATE_TYPES = ["comment", "status_change", "assignment", "milestone"]
+JOB_UPDATE_TYPES = [
+    "comment", "status_change", "assignment", "milestone",
+    "chat", "dm",
+]
 
 # Job statuses
 JOB_STATUSES = ["active", "completed", "on_hold", "cancelled"]
@@ -50,8 +53,8 @@ HAT_NAMES = [
 FULL_ACCESS_HATS = ["Admin / CEO / Owner", "IT / Tech Junkie"]
 
 # Locked hats — permissions cannot be edited, hat cannot be deleted.
-# Tracked by DB id (1, 2, 3) so renaming doesn't break the lock.
-LOCKED_HAT_IDS = {1, 2, 3}  # Admin, IT, Office — always the first 3 seeded
+# Tracked by DB id (1, 2) so renaming doesn't break the lock.
+LOCKED_HAT_IDS = {1, 2}  # Admin, IT — always the first 2 seeded
 
 # Map of old hat names → new hat names for migration
 _HAT_RENAME_MAP = {
@@ -64,6 +67,7 @@ _HAT_RENAME_MAP = {
 PERMISSION_KEYS = [
     # Tab access
     "tab_dashboard",
+    "show_dollar_values",
     "tab_parts_catalog",
     "tab_warehouse",
     "tab_trucks_inventory",
@@ -124,6 +128,7 @@ PERMISSION_KEYS = [
 # Human-readable labels for each permission
 PERMISSION_LABELS = {
     "tab_dashboard": "View Dashboard",
+    "show_dollar_values": "Show Dollar Values",
     "tab_parts_catalog": "View Parts Catalog",
     "tab_warehouse": "View Warehouse Inventory",
     "tab_trucks_inventory": "View Trucks Inventory",
@@ -177,7 +182,7 @@ PERMISSION_LABELS = {
 
 # Permission groups for organized display
 PERMISSION_GROUPS = {
-    "Tab Access": [k for k in PERMISSION_KEYS if k.startswith("tab_")],
+    "Tab Access": [k for k in PERMISSION_KEYS if k.startswith("tab_") or k == "show_dollar_values"],
     "Parts & Inventory": [k for k in PERMISSION_KEYS if k.startswith("parts_")],
     "Jobs": [k for k in PERMISSION_KEYS if k.startswith("jobs_")],
     "Labor": [k for k in PERMISSION_KEYS if k.startswith("labor_")],

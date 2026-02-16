@@ -25,11 +25,13 @@ class _TruckInventoryTab(QWidget):
         "Part #", "Description", "Qty On Hand", "Unit Cost", "Total Value",
     ]
 
-    def __init__(self, repo: Repository, truck_id: int, truck_label: str):
+    def __init__(self, repo: Repository, truck_id: int, truck_label: str,
+                 can_see_dollars: bool = True):
         super().__init__()
         self.repo = repo
         self.truck_id = truck_id
         self.truck_label = truck_label
+        self._can_see_dollars = can_see_dollars
         self._items: list = []
         self._setup_ui()
         self.refresh()
@@ -119,18 +121,29 @@ class _TruckInventoryTab(QWidget):
                 QTableWidgetItem(item.part_number),
                 QTableWidgetItem(item.part_description),
                 self._num_item(item.quantity),
-                QTableWidgetItem(format_currency(item.unit_cost)),
-                QTableWidgetItem(format_currency(value)),
+                QTableWidgetItem(
+                    format_currency(item.unit_cost)
+                    if self._can_see_dollars else "—"
+                ),
+                QTableWidgetItem(
+                    format_currency(value)
+                    if self._can_see_dollars else "—"
+                ),
             ]
 
             for col, cell in enumerate(cells):
                 self.table.setItem(row, col, cell)
 
         self.table.setSortingEnabled(True)
-        self.summary_label.setText(
-            f"{len(items)} parts  |  {total_qty} total items  |  "
-            f"Value: {format_currency(total_value)}"
-        )
+        if self._can_see_dollars:
+            self.summary_label.setText(
+                f"{len(items)} parts  |  {total_qty} total items  |  "
+                f"Value: {format_currency(total_value)}"
+            )
+        else:
+            self.summary_label.setText(
+                f"{len(items)} parts  |  {total_qty} total items"
+            )
 
     @staticmethod
     def _num_item(value: int) -> QTableWidgetItem:
@@ -146,9 +159,14 @@ class _TruckInventoryTab(QWidget):
 class TrucksInventoryPage(QWidget):
     """Container page with dynamic sub-tabs for each truck's inventory."""
 
-    def __init__(self, repo: Repository):
+    def __init__(self, repo: Repository, current_user=None):
         super().__init__()
         self.repo = repo
+        self.current_user = current_user
+        self._can_see_dollars = True
+        if current_user:
+            perms = repo.get_user_permissions(current_user.id)
+            self._can_see_dollars = "show_dollar_values" in perms
         self._truck_tabs: dict[int, _TruckInventoryTab] = {}
         self._setup_ui()
         self.refresh()
@@ -214,7 +232,10 @@ class TrucksInventoryPage(QWidget):
                 tab.refresh()
             else:
                 # Create new tab
-                tab = _TruckInventoryTab(self.repo, truck.id, label)
+                tab = _TruckInventoryTab(
+                    self.repo, truck.id, label,
+                    can_see_dollars=self._can_see_dollars,
+                )
                 self._truck_tabs[truck.id] = tab
                 self.truck_tabs.addTab(tab, label)
 

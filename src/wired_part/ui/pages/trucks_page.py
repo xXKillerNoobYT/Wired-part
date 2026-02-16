@@ -32,6 +32,10 @@ class TrucksPage(QWidget):
         super().__init__(parent)
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._setup_ui()
         self.refresh()
 
@@ -42,22 +46,30 @@ class TrucksPage(QWidget):
 
         # Toolbar
         toolbar = QHBoxLayout()
-        add_btn = QPushButton("Add Truck")
-        add_btn.clicked.connect(self._add_truck)
-        edit_btn = QPushButton("Edit Truck")
-        edit_btn.clicked.connect(self._edit_truck)
-        transfer_btn = QPushButton("New Transfer")
-        transfer_btn.clicked.connect(self._new_transfer)
-        receive_btn = QPushButton("Receive Transfer")
-        receive_btn.clicked.connect(self._receive_transfers)
-        return_btn = QPushButton("Return to Warehouse")
-        return_btn.clicked.connect(self._return_to_warehouse)
+        self.add_truck_btn = QPushButton("Add Truck")
+        self.add_truck_btn.clicked.connect(self._add_truck)
+        self.edit_truck_btn = QPushButton("Edit Truck")
+        self.edit_truck_btn.clicked.connect(self._edit_truck)
+        self.transfer_btn = QPushButton("New Transfer")
+        self.transfer_btn.clicked.connect(self._new_transfer)
+        self.receive_btn = QPushButton("Receive Transfer")
+        self.receive_btn.clicked.connect(self._receive_transfers)
+        self.return_btn = QPushButton("Return to Warehouse")
+        self.return_btn.clicked.connect(self._return_to_warehouse)
 
-        toolbar.addWidget(add_btn)
-        toolbar.addWidget(edit_btn)
-        toolbar.addWidget(transfer_btn)
-        toolbar.addWidget(receive_btn)
-        toolbar.addWidget(return_btn)
+        toolbar.addWidget(self.add_truck_btn)
+        toolbar.addWidget(self.edit_truck_btn)
+        toolbar.addWidget(self.transfer_btn)
+        toolbar.addWidget(self.receive_btn)
+        toolbar.addWidget(self.return_btn)
+
+        # Apply permission visibility
+        p = self._perms
+        self.add_truck_btn.setVisible("trucks_add" in p)
+        self.edit_truck_btn.setVisible("trucks_edit" in p)
+        self.transfer_btn.setVisible("trucks_transfer" in p)
+        self.receive_btn.setVisible("trucks_transfer" in p)
+        self.return_btn.setVisible("trucks_transfer" in p)
 
         # Filter trucks
         toolbar.addWidget(QLabel("  View:"))
@@ -66,6 +78,7 @@ class TrucksPage(QWidget):
         self.filter_combo.addItem("My Truck", "mine")
         self.filter_combo.addItem("With Pending Transfers", "pending")
         self.filter_combo.addItem("Unassigned", "unassigned")
+        self.filter_combo.setCurrentIndex(1)  # Default to "My Truck"
         self.filter_combo.currentIndexChanged.connect(self._refresh_truck_list)
         toolbar.addWidget(self.filter_combo)
 
@@ -222,6 +235,7 @@ class TrucksPage(QWidget):
             self.inv_table.setItem(
                 r, 3, QTableWidgetItem(
                     format_currency(item.quantity * item.unit_cost)
+                    if self._can_see_dollars else "\u2014"
                 )
             )
 

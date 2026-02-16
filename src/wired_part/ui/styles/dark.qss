@@ -271,3 +271,168 @@ QCheckBox::indicator:checked {
     background-color: #89b4fa;
     border-color: #89b4fa;
 }
+
+/* Dashboard cards */
+#SummaryCard {
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+#SummaryCardTitle {
+    color: #6c7086;
+    font-size: 12px;
+    background-color: transparent;
+}
+
+#SummaryCardValue {
+    font-size: 24px;
+    font-weight: bold;
+    background-color: transparent;
+}
+
+#PageTitle {
+    font-size: 20px;
+    font-weight: bold;
+    background-color: transparent;
+}
+
+/* ── Search Dialog (Ctrl+K) ── */
+#SearchDialog {
+    background-color: #1e1e2e;
+    border: 2px solid #45475a;
+    border-radius: 12px;
+}
+
+#SearchInput {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 16px;
+}
+
+#SearchInput:focus {
+    border-color: #89b4fa;
+}
+
+#SearchResultsList {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+#SearchResultsList::item {
+    padding: 10px 12px;
+    border-bottom: 1px solid #45475a;
+}
+
+#SearchResultsList::item:selected {
+    background-color: #45475a;
+    color: #89b4fa;
+}
+
+#SearchResultsList::item:hover:!selected {
+    background-color: #45475a;
+}
+
+#SearchCountsLabel {
+    color: #585b70;
+    font-size: 11px;
+    background-color: transparent;
+}
+
+#SearchHint {
+    color: #585b70;
+    font-size: 11px;
+    background-color: transparent;
+}
+
+/* ── Main Window Toolbar ── */
+#LogoutButton {
+    color: #f38ba8;
+    font-weight: bold;
+}
+
+#SearchHintStatus {
+    color: #585b70;
+    background-color: transparent;
+}
+
+#ClockStatusLabel {
+    background-color: transparent;
+}
+
+#ClockStatusLabel[active="true"] {
+    color: #a6e3a1;
+}
+
+#ClockStatusLabel[active="false"] {
+    color: #585b70;
+}
+
+#NotificationCountLabel {
+    background-color: transparent;
+}
+
+#NotificationCountLabel[alert="true"] {
+    color: #f38ba8;
+    font-weight: bold;
+}
+
+#NotificationCountLabel[alert="false"] {
+    color: #585b70;
+}
+
+#NotificationButton {
+    background-color: transparent;
+    border: none;
+}
+
+#NotificationButton[alert="true"] {
+    color: #f38ba8;
+}
+
+#NotificationButton[alert="false"] {
+    color: #cdd6f4;
+}
+
+/* ── Agent Page ── */
+#AgentStatusLabel[status="idle"] {
+    color: #585b70;
+    background-color: transparent;
+}
+
+#AgentStatusLabel[status="running"] {
+    color: #89b4fa;
+    background-color: transparent;
+}
+
+#AgentStatusLabel[status="completed"] {
+    color: #a6e3a1;
+    background-color: transparent;
+}
+
+#AgentStatusLabel[status="error"] {
+    color: #f38ba8;
+    background-color: transparent;
+}
+
+#AgentConnectionLabel[status="connected"] {
+    color: #a6e3a1;
+    background-color: transparent;
+}
+
+#AgentConnectionLabel[status="disconnected"] {
+    color: #f38ba8;
+    background-color: transparent;
+}
+
+#AgentConnectionInfo {
+    color: #585b70;
+    font-size: 11px;
+    background-color: transparent;
+}

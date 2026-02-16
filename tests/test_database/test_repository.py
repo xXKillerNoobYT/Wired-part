@@ -65,6 +65,97 @@ class TestPartsCRUD:
         repo.delete_part(pid)
         assert repo.get_part_by_id(pid) is None
 
+    def test_can_delete_part_no_references(self, repo):
+        pid = repo.create_part(Part(
+            part_number="CAN-DEL-001",
+            description="No refs",
+            quantity=0,
+        ))
+        can, reason = repo.can_delete_part(pid)
+        assert can is True
+        assert reason == ""
+
+    def test_can_delete_part_blocked_by_truck_inventory(self, repo):
+        from wired_part.database.models import Truck
+        pid = repo.create_part(Part(
+            part_number="CAN-DEL-002",
+            description="On truck",
+            quantity=10,
+        ))
+        truck = Truck(name="Test Truck", truck_number="T-100")
+        truck.id = repo.create_truck(truck)
+        repo.add_to_truck_inventory(truck.id, pid, 5)
+        can, reason = repo.can_delete_part(pid)
+        assert can is False
+        assert "truck" in reason.lower()
+
+    def test_can_delete_part_blocked_by_active_job(self, repo):
+        from wired_part.database.models import Job
+        pid = repo.create_part(Part(
+            part_number="CAN-DEL-003",
+            description="On job",
+            quantity=10,
+        ))
+        job = Job(job_number="JOB-DEL-001", name="Del Job",
+                  customer="Test", status="active")
+        job.id = repo.create_job(job)
+        # Directly insert a job_parts row to simulate consumption
+        repo.db.execute(
+            "INSERT INTO job_parts (job_id, part_id, quantity_used, "
+            "unit_cost_at_use) VALUES (?, ?, 3, 5.00)",
+            (job.id, pid),
+        )
+        can, reason = repo.can_delete_part(pid)
+        assert can is False
+        assert "active job" in reason.lower()
+
+    def test_delete_part_force_cleans_history(self, repo):
+        """force=True removes FK child rows then the part."""
+        from wired_part.database.models import Truck, User
+        pid = repo.create_part(Part(
+            part_number="FORCE-DEL-001",
+            description="Force del",
+            quantity=10,
+        ))
+        truck = Truck(name="FD Truck", truck_number="T-FD")
+        truck.id = repo.create_truck(truck)
+        user = User(username="fduser", display_name="FD User",
+                    pin_hash="1234")
+        user.id = repo.create_user(user)
+        # Directly insert a truck_transfers row (FK RESTRICT on part_id)
+        repo.db.execute(
+            "INSERT INTO truck_transfers "
+            "(part_id, truck_id, quantity, direction, status, created_by) "
+            "VALUES (?, ?, 5, 'outbound', 'received', ?)",
+            (pid, truck.id, user.id),
+        )
+        # Without force, this would raise IntegrityError
+        repo.delete_part(pid, force=True)
+        assert repo.get_part_by_id(pid) is None
+
+    def test_delete_part_no_force_raises_with_fk(self, repo):
+        """Without force, FK RESTRICT blocks deletion."""
+        import sqlite3
+        from wired_part.database.models import Truck, User
+        pid = repo.create_part(Part(
+            part_number="NOFRC-DEL-001",
+            description="No force",
+            quantity=10,
+        ))
+        truck = Truck(name="NF Truck", truck_number="T-NF")
+        truck.id = repo.create_truck(truck)
+        user = User(username="nfuser", display_name="NF User",
+                    pin_hash="1234")
+        user.id = repo.create_user(user)
+        repo.db.execute(
+            "INSERT INTO truck_transfers "
+            "(part_id, truck_id, quantity, direction, status, created_by) "
+            "VALUES (?, ?, 5, 'outbound', 'received', ?)",
+            (pid, truck.id, user.id),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.delete_part(pid)
+
     def test_search_parts(self, repo):
         repo.create_part(Part(
             part_number="ROMEX-14",

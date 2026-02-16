@@ -466,6 +466,60 @@ class TestSchemaMigrationSafety:
         assert len(matching) == 1
         assert matching[0].target_tab == "trucks"
 
+    def test_get_user_notifications_filtered(self, repo):
+        """Filtered notifications method returns correct subset."""
+        user = User(
+            username="filtnotif",
+            display_name="Filter Notif",
+            pin_hash=repo.hash_pin("0000"),
+            role="user",
+        )
+        user.id = repo.create_user(user)
+
+        # Create mixed notifications
+        repo.create_notification(Notification(
+            user_id=user.id, title="Info Sys", message="",
+            severity="info", source="system",
+        ))
+        repo.create_notification(Notification(
+            user_id=user.id, title="Warn Agent", message="",
+            severity="warning", source="agent",
+        ))
+        nid_read = repo.create_notification(Notification(
+            user_id=user.id, title="Info Read", message="",
+            severity="info", source="system",
+        ))
+        repo.mark_notification_read(nid_read)
+
+        # No filters — should get all 3
+        all_notifs = repo.get_user_notifications_filtered(user.id)
+        assert len(all_notifs) == 3
+
+        # Filter by severity
+        warnings = repo.get_user_notifications_filtered(
+            user.id, severity="warning"
+        )
+        assert len(warnings) == 1
+        assert warnings[0].title == "Warn Agent"
+
+        # Filter by source
+        agent = repo.get_user_notifications_filtered(
+            user.id, source="agent"
+        )
+        assert len(agent) == 1
+
+        # Filter by read status
+        unread = repo.get_user_notifications_filtered(
+            user.id, is_read=0
+        )
+        assert len(unread) == 2
+
+        read = repo.get_user_notifications_filtered(
+            user.id, is_read=1
+        )
+        assert len(read) == 1
+        assert read[0].title == "Info Read"
+
 
 # ── BRO on Jobs — Extended ──────────────────────────────────────────
 

@@ -51,44 +51,31 @@ class SearchDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        self.setStyleSheet(
-            "QDialog { background: #1e1e2e; border: 2px solid #585b70; "
-            "border-radius: 12px; }"
-        )
+        # All styling via QSS object names — no inline setStyleSheet
+        self.setObjectName("SearchDialog")
 
         # Search input
         self.search_input = QLineEdit()
+        self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("Search jobs, parts, users, orders, notes...")
         self.search_input.setMinimumHeight(36)
-        self.search_input.setStyleSheet(
-            "QLineEdit { font-size: 14px; padding: 6px 12px; "
-            "border: 1px solid #45475a; border-radius: 8px; "
-            "background: #313244; color: #cdd6f4; }"
-        )
         self.search_input.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.search_input)
 
         # Category counts row
         self.counts_label = QLabel("")
-        self.counts_label.setStyleSheet(
-            "font-size: 11px; color: #6c7086; padding: 0 4px;"
-        )
+        self.counts_label.setObjectName("SearchCountsLabel")
         layout.addWidget(self.counts_label)
 
         # Results list
         self.results_list = QListWidget()
-        self.results_list.setStyleSheet(
-            "QListWidget { border: none; background: transparent; }"
-            "QListWidget::item { padding: 6px 8px; border-radius: 6px; }"
-            "QListWidget::item:selected { background: #313244; }"
-            "QListWidget::item:hover { background: #2a2b3d; }"
-        )
+        self.results_list.setObjectName("SearchResultsList")
         self.results_list.itemActivated.connect(self._on_item_activated)
         layout.addWidget(self.results_list, 1)
 
         # Hint
         hint = QLabel("Enter to select  |  Esc to close")
-        hint.setStyleSheet("font-size: 10px; color: #585b70;")
+        hint.setObjectName("SearchHint")
         hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(hint)
 

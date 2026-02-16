@@ -35,6 +35,7 @@ from .models import (
     TruckTransfer,
     User,
     UserHat,
+    UserSettings,
 )
 
 
@@ -43,6 +44,16 @@ class Repository:
 
     def __init__(self, db: DatabaseConnection):
         self.db = db
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        """Escape special LIKE characters so they match literally."""
+        return (
+            value
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
 
     # ── Categories ──────────────────────────────────────────────
 
@@ -141,19 +152,20 @@ class Repository:
         """Search parts by keyword across multiple fields."""
         if not query.strip():
             return self.get_all_parts()
-        pattern = f"%{query.strip()}%"
+        escaped = self._escape_like(query.strip())
+        pattern = f"%{escaped}%"
         rows = self.db.execute(
             self._PARTS_SELECT + """
-            WHERE p.part_number LIKE ?
-               OR p.description LIKE ?
-               OR p.name LIKE ?
-               OR p.location LIKE ?
-               OR p.supplier LIKE ?
-               OR p.notes LIKE ?
-               OR p.brand_part_number LIKE ?
-               OR p.local_part_number LIKE ?
-               OR p.subcategory LIKE ?
-               OR COALESCE(b.name, '') LIKE ?
+            WHERE p.part_number LIKE ? ESCAPE '\\'
+               OR p.description LIKE ? ESCAPE '\\'
+               OR p.name LIKE ? ESCAPE '\\'
+               OR p.location LIKE ? ESCAPE '\\'
+               OR p.supplier LIKE ? ESCAPE '\\'
+               OR p.notes LIKE ? ESCAPE '\\'
+               OR p.brand_part_number LIKE ? ESCAPE '\\'
+               OR p.local_part_number LIKE ? ESCAPE '\\'
+               OR p.subcategory LIKE ? ESCAPE '\\'
+               OR COALESCE(b.name, '') LIKE ? ESCAPE '\\'
             ORDER BY p.name, p.part_number
         """, (pattern,) * 10)
         return [Part(**dict(r)) for r in rows]
@@ -287,8 +299,76 @@ class Repository:
             ))
         self._try_advance_if_deprecating(part.id)
 
-    def delete_part(self, part_id: int):
+    def can_delete_part(self, part_id: int) -> tuple[bool, str]:
+        """Check whether a part can be safely deleted.
+
+        Returns (True, "") if deletable, or (False, reason) if blocked
+        by live references (active job usage or truck inventory).
+        """
+        # Check live truck inventory
+        rows = self.db.execute(
+            "SELECT ti.quantity, t.name AS truck_name "
+            "FROM truck_inventory ti "
+            "JOIN trucks t ON ti.truck_id = t.id "
+            "WHERE ti.part_id = ? AND ti.quantity > 0",
+            (part_id,),
+        )
+        if rows:
+            truck = dict(rows[0])
+            return (
+                False,
+                f"Part has {truck['quantity']} units on truck "
+                f"'{truck['truck_name']}'.",
+            )
+
+        # Check active job usage
+        rows = self.db.execute(
+            "SELECT jp.quantity_used, j.job_number "
+            "FROM job_parts jp "
+            "JOIN jobs j ON jp.job_id = j.id "
+            "WHERE jp.part_id = ? AND j.status = 'active' "
+            "AND jp.quantity_used > 0",
+            (part_id,),
+        )
+        if rows:
+            job = dict(rows[0])
+            return (
+                False,
+                f"Part is in use on active job {job['job_number']}.",
+            )
+
+        return (True, "")
+
+    def delete_part(self, part_id: int, force: bool = False):
+        """Delete a part from the catalog.
+
+        Args:
+            part_id: The part to delete.
+            force: If True, cascade-delete all historical references
+                   (transfers, consumption logs, order items, etc.)
+                   before removing the part itself.  When False the
+                   caller must ensure no FK references remain or an
+                   ``IntegrityError`` will be raised by SQLite.
+        """
         with self.db.get_connection() as conn:
+            if force:
+                # Remove historical / FK-RESTRICT child rows first.
+                # CASCADE tables (part_suppliers, part_variants,
+                # inventory_audits, order_suggestions, order_patterns)
+                # are handled automatically by SQLite.
+                for table in (
+                    "truck_transfers",
+                    "consumption_log",
+                    "purchase_order_items",
+                    "return_authorization_items",
+                    "parts_list_items",
+                    "truck_inventory",
+                    "job_parts",
+                ):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE part_id = ?",
+                        (part_id,),
+                    )
             conn.execute("DELETE FROM parts WHERE id = ?", (part_id,))
 
     # ── Brands ────────────────────────────────────────────────────
@@ -542,7 +622,44 @@ class Repository:
                 job.id,
             ))
 
-    def delete_job(self, job_id: int):
+    def can_delete_job(self, job_id: int) -> tuple[bool, str]:
+        """Check whether a job can be safely deleted.
+
+        Returns (allowed, reason).  Deletion is blocked if the job has
+        labor entries, consumed parts, or active purchase orders.
+        """
+        blockers = []
+        labor = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM labor_entries WHERE job_id = ?",
+            (job_id,),
+        )
+        if labor and labor[0]["cnt"] > 0:
+            blockers.append(f"{labor[0]['cnt']} labor entries")
+
+        consumed = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM consumption_log WHERE job_id = ?",
+            (job_id,),
+        )
+        if consumed and consumed[0]["cnt"] > 0:
+            blockers.append(f"{consumed[0]['cnt']} consumed parts")
+
+        job_parts_rows = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM job_parts WHERE job_id = ?",
+            (job_id,),
+        )
+        if job_parts_rows and job_parts_rows[0]["cnt"] > 0:
+            blockers.append(f"{job_parts_rows[0]['cnt']} job parts")
+
+        if blockers:
+            return False, f"Cannot delete: job has {', '.join(blockers)}"
+        return True, ""
+
+    def delete_job(self, job_id: int, *, force: bool = False):
+        """Delete a job.  Blocked if the job has labor/parts unless force=True."""
+        if not force:
+            allowed, reason = self.can_delete_job(job_id)
+            if not allowed:
+                raise ValueError(reason)
         with self.db.get_connection() as conn:
             conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
@@ -809,10 +926,11 @@ class Repository:
     ):
         """Directly add/upsert quantity into truck on-hand inventory."""
         self.db.execute("""
-            INSERT INTO truck_inventory (truck_id, part_id, quantity)
-            VALUES (?, ?, ?)
+            INSERT INTO truck_inventory (truck_id, part_id, quantity, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(truck_id, part_id) DO UPDATE SET
-                quantity = quantity + excluded.quantity
+                quantity = quantity + excluded.quantity,
+                updated_at = CURRENT_TIMESTAMP
         """, (truck_id, part_id, quantity))
 
     def set_truck_inventory_levels(
@@ -822,7 +940,8 @@ class Repository:
         """Set min/max stock levels for a part on a truck."""
         self.db.execute("""
             UPDATE truck_inventory
-            SET min_quantity = ?, max_quantity = ?
+            SET min_quantity = ?, max_quantity = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE truck_id = ? AND part_id = ?
         """, (min_quantity, max_quantity, truck_id, part_id))
 
@@ -831,10 +950,11 @@ class Repository:
     ):
         """Directly set current quantity (does NOT affect warehouse)."""
         self.db.execute("""
-            INSERT INTO truck_inventory (truck_id, part_id, quantity)
-            VALUES (?, ?, ?)
+            INSERT INTO truck_inventory (truck_id, part_id, quantity, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(truck_id, part_id) DO UPDATE SET
-                quantity = excluded.quantity
+                quantity = excluded.quantity,
+                updated_at = CURRENT_TIMESTAMP
         """, (truck_id, part_id, quantity))
 
     def get_truck_inventory_with_levels(
@@ -862,24 +982,26 @@ class Repository:
         preserved for supply chain traceability (v12).
         """
         with self.db.get_connection() as conn:
-            # Validate warehouse stock
+            # Validate part exists
             part_row = conn.execute(
                 "SELECT quantity FROM parts WHERE id = ?",
                 (transfer.part_id,),
             ).fetchone()
             if not part_row:
                 raise ValueError(f"Part {transfer.part_id} not found")
-            if part_row["quantity"] < transfer.quantity:
+
+            # Atomic deduct — UPDATE only succeeds if stock sufficient
+            cursor = conn.execute(
+                "UPDATE parts SET quantity = quantity - ? "
+                "WHERE id = ? AND quantity >= ?",
+                (transfer.quantity, transfer.part_id, transfer.quantity),
+            )
+            if cursor.rowcount == 0:
                 raise ValueError(
-                    f"Insufficient warehouse stock: have "
+                    f"Insufficient warehouse stock for part "
+                    f"{transfer.part_id}: have "
                     f"{part_row['quantity']}, need {transfer.quantity}"
                 )
-
-            # Deduct from warehouse
-            conn.execute(
-                "UPDATE parts SET quantity = quantity - ? WHERE id = ?",
-                (transfer.quantity, transfer.part_id),
-            )
 
             # v12: If no supplier set, try to find the most recent supplier
             # for this part from the receive log
@@ -892,7 +1014,7 @@ class Repository:
                     JOIN purchase_order_items poi
                         ON rl.order_item_id = poi.id
                     WHERE poi.part_id = ? AND rl.supplier_id IS NOT NULL
-                    ORDER BY rl.received_at DESC LIMIT 1
+                    ORDER BY rl.received_at DESC, rl.id DESC LIMIT 1
                 """, (transfer.part_id,)).fetchone()
                 if recent:
                     supplier_id = recent["supplier_id"]
@@ -926,10 +1048,11 @@ class Repository:
 
             # Add to truck on-hand inventory
             conn.execute("""
-                INSERT INTO truck_inventory (truck_id, part_id, quantity)
-                VALUES (?, ?, ?)
+                INSERT INTO truck_inventory (truck_id, part_id, quantity, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(truck_id, part_id) DO UPDATE SET
-                    quantity = quantity + excluded.quantity
+                    quantity = quantity + excluded.quantity,
+                    updated_at = CURRENT_TIMESTAMP
             """, (row["truck_id"], row["part_id"], row["quantity"]))
 
             # Mark transfer as received
@@ -986,7 +1109,8 @@ class Repository:
 
             # Deduct from truck
             conn.execute(
-                "UPDATE truck_inventory SET quantity = quantity - ? "
+                "UPDATE truck_inventory SET quantity = quantity - ?, "
+                "updated_at = CURRENT_TIMESTAMP "
                 "WHERE truck_id = ? AND part_id = ?",
                 (quantity, truck_id, part_id),
             )
@@ -1128,7 +1252,8 @@ class Repository:
 
             # Deduct from truck on-hand
             conn.execute(
-                "UPDATE truck_inventory SET quantity = quantity - ? "
+                "UPDATE truck_inventory SET quantity = quantity - ?, "
+                "updated_at = CURRENT_TIMESTAMP "
                 "WHERE truck_id = ? AND part_id = ?",
                 (quantity, truck_id, part_id),
             )
@@ -1139,16 +1264,21 @@ class Repository:
                 "WHERE job_id = ? AND part_id = ?",
                 (job_id, part_id),
             ).fetchone()
-            if (existing_jp and existing_jp["supplier_id"]
-                    and supplier_id
-                    and existing_jp["supplier_id"] != supplier_id):
-                raise ValueError(
-                    f"Supplier conflict: part {part_id} on job "
-                    f"{job_id} is already supplied by supplier "
-                    f"{existing_jp['supplier_id']}; cannot consume "
-                    f"from supplier {supplier_id}. A part must "
-                    f"come from the same supplier for the entire job."
-                )
+            if existing_jp and existing_jp["supplier_id"] and supplier_id:
+                if existing_jp["supplier_id"] != supplier_id:
+                    raise ValueError(
+                        f"Supplier conflict: part {part_id} on job "
+                        f"{job_id} is already supplied by supplier "
+                        f"{existing_jp['supplier_id']}; cannot consume "
+                        f"from supplier {supplier_id}. A part must "
+                        f"come from the same supplier for the entire "
+                        f"job."
+                    )
+            elif (existing_jp and existing_jp["supplier_id"]
+                  and not supplier_id):
+                # Existing has known supplier, new consume has unknown —
+                # inherit existing supplier_id
+                supplier_id = existing_jp["supplier_id"]
 
             # Add to job_parts (or update existing) — v12: with supplier
             conn.execute("""
@@ -1339,6 +1469,69 @@ class Repository:
             WHERE (user_id = ? OR user_id IS NULL) AND is_read = 0
         """, (user_id,))
         return rows[0]["cnt"] if rows else 0
+
+    MAX_NOTIFICATIONS = 500
+
+    def cleanup_old_notifications(self, days: int = 90) -> int:
+        """Delete notifications older than *days* days.  Returns count deleted."""
+        with self.db.get_connection() as conn:
+            cursor = conn.execute("""
+                DELETE FROM notifications
+                WHERE created_at < datetime('now', ? || ' days')
+            """, (f"-{days}",))
+            return cursor.rowcount
+
+    def enforce_notification_cap(self) -> int:
+        """Purge oldest read notifications when total exceeds MAX_NOTIFICATIONS.
+
+        Returns the number of purged rows.
+        """
+        total = self.db.execute("SELECT COUNT(*) AS cnt FROM notifications")
+        count = total[0]["cnt"] if total else 0
+        if count <= self.MAX_NOTIFICATIONS:
+            return 0
+        excess = count - self.MAX_NOTIFICATIONS
+        with self.db.get_connection() as conn:
+            # Delete oldest *read* notifications first
+            cursor = conn.execute("""
+                DELETE FROM notifications WHERE id IN (
+                    SELECT id FROM notifications
+                    WHERE is_read = 1
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                )
+            """, (excess,))
+            return cursor.rowcount
+
+    def get_user_notifications_filtered(
+        self,
+        user_id: int,
+        severity: str | None = None,
+        source: str | None = None,
+        is_read: int | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Notification]:
+        """Fetch notifications with optional severity/source/read filters."""
+        clauses = ["(user_id = ? OR user_id IS NULL)"]
+        params: list = [user_id]
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity)
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        if is_read is not None:
+            clauses.append("is_read = ?")
+            params.append(is_read)
+        where = " AND ".join(clauses)
+        params.extend([limit, offset])
+        rows = self.db.execute(
+            f"SELECT * FROM notifications WHERE {where} "
+            f"ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(params),
+        )
+        return [Notification(**dict(r)) for r in rows]
 
     # ── Summaries ───────────────────────────────────────────────
 
@@ -1639,15 +1832,19 @@ class Repository:
 
         Loops through all stages until blocked or fully archived.
         Returns the final status after all possible advances.
+        Logs each transition and creates a notification on archive.
 
         Pipeline:
           pending → winding_down (all open jobs closed or part removed)
           winding_down → zero_stock (truck qty = 0)
           zero_stock → archived (warehouse qty = 0)
         """
-        # Loop so we advance through multiple stages in one call
-        # when conditions are already met (e.g. qty already 0)
-        for _ in range(4):  # max 4 iterations (safety bound)
+        from wired_part.database.models import Notification
+
+        MAX_DEPRECATION_ADVANCES = 4
+        transitions = []
+
+        for _ in range(MAX_DEPRECATION_ADVANCES):
             progress = self.check_deprecation_progress(part_id)
             current = progress["deprecation_status"]
 
@@ -1657,7 +1854,8 @@ class Repository:
                         "UPDATE parts SET deprecation_status = 'winding_down' "
                         "WHERE id = ?", (part_id,)
                     )
-                continue  # Try next stage
+                transitions.append(("pending", "winding_down"))
+                continue
 
             elif current == "winding_down" and progress["truck_quantity"] == 0:
                 with self.db.get_connection() as conn:
@@ -1665,7 +1863,8 @@ class Repository:
                         "UPDATE parts SET deprecation_status = 'zero_stock' "
                         "WHERE id = ?", (part_id,)
                     )
-                continue  # Try next stage
+                transitions.append(("winding_down", "zero_stock"))
+                continue
 
             elif current == "zero_stock" and progress["warehouse_quantity"] == 0:
                 with self.db.get_connection() as conn:
@@ -1673,13 +1872,40 @@ class Repository:
                         "UPDATE parts SET deprecation_status = 'archived' "
                         "WHERE id = ?", (part_id,)
                     )
+                transitions.append(("zero_stock", "archived"))
+
+                # Log and notify on archive
+                part = self.get_part_by_id(part_id)
+                pn = part.part_number if part else str(part_id)
+                self.log_activity(
+                    user_id=None,
+                    action="deprecation_archived",
+                    entity_type="part",
+                    entity_id=part_id,
+                    details=f"Part {pn} fully archived",
+                )
+                self.create_notification(Notification(
+                    title="Part Archived",
+                    message=f"Part {pn} has been fully deprecated "
+                            f"and archived.",
+                    severity="info",
+                    source="system",
+                ))
                 return "archived"
 
             else:
-                # Can't advance further
                 break
 
-        # Re-check final status
+        # Log each transition
+        for from_status, to_status in transitions:
+            self.log_activity(
+                user_id=None,
+                action=f"deprecation_{to_status}",
+                entity_type="part",
+                entity_id=part_id,
+                details=f"Deprecation advanced: {from_status} → {to_status}",
+            )
+
         final = self.check_deprecation_progress(part_id)
         return final["deprecation_status"] or ""
 
@@ -1690,13 +1916,18 @@ class Repository:
         (update_part, receive_transfer, return_to_warehouse,
         consume_from_truck) so the deprecation pipeline stays current.
         """
+        import logging
+
         try:
             part = self.get_part_by_id(part_id)
             if part and part.deprecation_status and \
                part.deprecation_status != "archived":
                 self.advance_deprecation(part_id)
-        except Exception:
-            pass  # Never let deprecation logic break normal operations
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Deprecation auto-advance failed for part %s: %s",
+                part_id, exc,
+            )
 
     def cancel_deprecation(self, part_id: int):
         """Cancel an in-progress deprecation."""
@@ -2054,6 +2285,21 @@ class Repository:
         """Get billing data filtered by a specific period."""
         return self.get_billing_data(job_id, period_start, period_end)
 
+    def is_billing_period_closed(self, job_id: int, target_date: str) -> bool:
+        """Check if *target_date* falls within a closed billing period for *job_id*.
+
+        Returns True if a closed period covers the date, False otherwise.
+        """
+        rows = self.db.execute("""
+            SELECT bp.id FROM billing_periods bp
+            JOIN billing_cycles bc ON bp.billing_cycle_id = bc.id
+            WHERE bc.job_id = ?
+              AND bp.status = 'closed'
+              AND DATE(?) BETWEEN DATE(bp.period_start) AND DATE(bp.period_end)
+            LIMIT 1
+        """, (job_id, target_date))
+        return len(rows) > 0
+
     # ── Labor Entries ─────────────────────────────────────────────
 
     def create_labor_entry(self, entry: LaborEntry) -> int:
@@ -2073,8 +2319,9 @@ class Repository:
                     (user_id, job_id, start_time, end_time, hours,
                      description, sub_task_category, photos,
                      clock_in_lat, clock_in_lon, clock_out_lat, clock_out_lon,
-                     is_overtime, bill_out_rate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_overtime, bill_out_rate,
+                     drive_time_minutes, checkout_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.user_id, entry.job_id, entry.start_time,
                 entry.end_time, entry.hours, entry.description,
@@ -2082,6 +2329,7 @@ class Repository:
                 entry.clock_in_lat, entry.clock_in_lon,
                 entry.clock_out_lat, entry.clock_out_lon,
                 entry.is_overtime, bro,
+                entry.drive_time_minutes, entry.checkout_notes,
             ))
             return cursor.lastrowid
 
@@ -2093,7 +2341,8 @@ class Repository:
                     hours = ?, description = ?, sub_task_category = ?,
                     photos = ?, clock_in_lat = ?, clock_in_lon = ?,
                     clock_out_lat = ?, clock_out_lon = ?,
-                    is_overtime = ?
+                    is_overtime = ?, drive_time_minutes = ?,
+                    checkout_notes = ?
                 WHERE id = ?
             """, (
                 entry.user_id, entry.job_id, entry.start_time,
@@ -2101,7 +2350,8 @@ class Repository:
                 entry.sub_task_category, entry.photos,
                 entry.clock_in_lat, entry.clock_in_lon,
                 entry.clock_out_lat, entry.clock_out_lon,
-                entry.is_overtime, entry.id,
+                entry.is_overtime, entry.drive_time_minutes,
+                entry.checkout_notes, entry.id,
             ))
 
     def delete_labor_entry(self, entry_id: int):
@@ -2200,6 +2450,15 @@ class Repository:
                 f"Already clocked in to job {active.job_number} "
                 f"since {active.start_time}"
             )
+
+        # Block clock-in if today falls within a closed billing period
+        today_iso = datetime.now().strftime("%Y-%m-%d")
+        if self.is_billing_period_closed(job_id, today_iso):
+            raise ValueError(
+                f"Cannot clock in: billing period covering {today_iso} "
+                f"is already closed for this job."
+            )
+
         entry = LaborEntry(
             user_id=user_id,
             job_id=job_id,
@@ -2505,17 +2764,25 @@ class Repository:
         return NotebookPage(**dict(rows[0])) if rows else None
 
     def search_notebook_pages(
-        self, query: str, job_id: int = None
+        self, query: str, job_id: int = None,
+        section_id: int = None,
     ) -> list[NotebookPage]:
-        """Search notebook pages by title or content."""
+        """Search notebook pages by title or content.
+
+        Optional filters: job_id, section_id.
+        """
         if not query.strip():
             return []
-        pattern = f"%{query.strip()}%"
+        escaped = self._escape_like(query.strip())
+        pattern = f"%{escaped}%"
         params: list = [pattern, pattern]
-        job_filter = ""
+        extra_filter = ""
         if job_id is not None:
-            job_filter = "AND nb.job_id = ?"
+            extra_filter += " AND nb.job_id = ?"
             params.append(job_id)
+        if section_id is not None:
+            extra_filter += " AND np.section_id = ?"
+            params.append(section_id)
         rows = self.db.execute(f"""
             SELECT np.*, ns.name AS section_name,
                    COALESCE(u.display_name, '') AS created_by_name
@@ -2523,11 +2790,42 @@ class Repository:
             JOIN notebook_sections ns ON np.section_id = ns.id
             JOIN job_notebooks nb ON ns.notebook_id = nb.id
             LEFT JOIN users u ON np.created_by = u.id
-            WHERE (np.title LIKE ? OR np.content LIKE ?)
-            {job_filter}
+            WHERE (np.title LIKE ? ESCAPE '\\' OR np.content LIKE ? ESCAPE '\\')
+            {extra_filter}
             ORDER BY np.updated_at DESC
         """, tuple(params))
         return [NotebookPage(**dict(r)) for r in rows]
+
+    def search_notebook_with_snippets(
+        self, query: str, job_id: int = None, max_snippet: int = 120,
+    ) -> list[dict]:
+        """Search notebook pages and return results with context snippets.
+
+        Returns list of dicts with page info + a snippet of matching content.
+        """
+        pages = self.search_notebook_pages(query, job_id=job_id)
+        results = []
+        q_lower = query.lower()
+        for page in pages:
+            snippet = ""
+            content = page.content or ""
+            idx = content.lower().find(q_lower)
+            if idx >= 0:
+                start = max(0, idx - 40)
+                end = min(len(content), idx + len(query) + max_snippet - 40)
+                snippet = ("..." if start > 0 else "") + content[start:end]
+                if end < len(content):
+                    snippet += "..."
+            elif content:
+                snippet = content[:max_snippet] + ("..." if len(content) > max_snippet else "")
+            results.append({
+                "page_id": page.id,
+                "title": page.title,
+                "section_name": page.section_name,
+                "snippet": snippet,
+                "updated_at": str(page.updated_at or ""),
+            })
+        return results
 
     # ── Notebook Attachments ───────────────────────────────────────
 
@@ -2718,7 +3016,7 @@ class Repository:
     def update_hat_permissions(self, hat_id: int, permissions: list[str]):
         """Update the permissions for a hat.
 
-        Raises ValueError if the hat is locked (Admin, IT, Office).
+        Raises ValueError if the hat is locked (Admin, IT).
         """
         from wired_part.utils.constants import LOCKED_HAT_IDS
         if hat_id in LOCKED_HAT_IDS:
@@ -2735,7 +3033,7 @@ class Repository:
     def delete_hat(self, hat_id: int):
         """Delete a hat (removes all user assignments too via CASCADE).
 
-        Raises ValueError if the hat is locked (Admin, IT, Office).
+        Raises ValueError if the hat is locked (Admin, IT).
         """
         from wired_part.utils.constants import LOCKED_HAT_IDS
         if hat_id in LOCKED_HAT_IDS:
@@ -3019,9 +3317,27 @@ class Repository:
             (order_id,),
         )
 
-    def close_purchase_order(self, order_id: int):
-        """Manually close an order."""
+    def close_purchase_order(self, order_id: int, *, force: bool = False):
+        """Manually close an order.
+
+        By default, raises ValueError if unreceived items remain.
+        Pass force=True to close regardless.
+        """
         from datetime import datetime
+
+        if not force:
+            items = self.get_order_items(order_id)
+            unreceived = [i for i in items if not i.is_fully_received]
+            if unreceived:
+                parts = ", ".join(
+                    f"{i.part_number} ({i.quantity_remaining} remaining)"
+                    for i in unreceived
+                )
+                raise ValueError(
+                    f"Order {order_id} has unreceived items: {parts}. "
+                    f"Use force=True to close anyway."
+                )
+
         self.db.execute(
             "UPDATE purchase_orders SET status = 'closed', "
             "closed_at = ? WHERE id = ?",
@@ -3499,6 +3815,26 @@ class Repository:
             ra_id = cursor.lastrowid
 
             for item in items:
+                if item.quantity <= 0:
+                    raise ValueError(
+                        f"Return item quantity must be positive, "
+                        f"got {item.quantity} for part {item.part_id}."
+                    )
+                # Validate warehouse has enough stock
+                stock_row = conn.execute(
+                    "SELECT quantity FROM parts WHERE id = ?",
+                    (item.part_id,),
+                ).fetchone()
+                if not stock_row:
+                    raise ValueError(
+                        f"Part {item.part_id} not found."
+                    )
+                if stock_row["quantity"] < item.quantity:
+                    raise ValueError(
+                        f"Insufficient warehouse stock for part "
+                        f"{item.part_id}: have {stock_row['quantity']}, "
+                        f"need {item.quantity} for return."
+                    )
                 conn.execute(
                     "INSERT INTO return_authorization_items "
                     "(ra_id, part_id, quantity, unit_cost, reason) "
@@ -3508,7 +3844,7 @@ class Repository:
                 )
                 # Deduct from warehouse
                 conn.execute(
-                    "UPDATE parts SET quantity = MAX(0, quantity - ?) "
+                    "UPDATE parts SET quantity = quantity - ? "
                     "WHERE id = ?",
                     (item.quantity, item.part_id),
                 )
@@ -4036,13 +4372,15 @@ class Repository:
                 "orders": [], "pages": [],
             }
 
-        q = f"%{query.strip()}%"
+        escaped = self._escape_like(query.strip())
+        q = f"%{escaped}%"
 
         # Jobs
         jobs = self.db.execute("""
             SELECT id, job_number, name, customer, status
             FROM jobs
-            WHERE job_number LIKE ? OR name LIKE ? OR customer LIKE ?
+            WHERE job_number LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'
+               OR customer LIKE ? ESCAPE '\\'
             ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
                      created_at DESC
             LIMIT 10
@@ -4058,8 +4396,8 @@ class Repository:
         parts = self.db.execute("""
             SELECT id, part_number, name, description, quantity
             FROM parts
-            WHERE part_number LIKE ? OR name LIKE ?
-               OR description LIKE ? OR local_part_number LIKE ?
+            WHERE part_number LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'
+               OR description LIKE ? ESCAPE '\\' OR local_part_number LIKE ? ESCAPE '\\'
             ORDER BY name, part_number
             LIMIT 10
         """, (q, q, q, q))
@@ -4074,7 +4412,7 @@ class Repository:
         users = self.db.execute("""
             SELECT id, username, display_name, is_active
             FROM users
-            WHERE display_name LIKE ? OR username LIKE ?
+            WHERE display_name LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\'
             ORDER BY is_active DESC, display_name
             LIMIT 10
         """, (q, q))
@@ -4092,7 +4430,7 @@ class Repository:
                    COALESCE(s.name, '') AS supplier_name
             FROM purchase_orders po
             LEFT JOIN suppliers s ON po.supplier_id = s.id
-            WHERE po.order_number LIKE ? OR s.name LIKE ?
+            WHERE po.order_number LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\'
             ORDER BY po.created_at DESC
             LIMIT 10
         """, (q, q))
@@ -4110,7 +4448,7 @@ class Repository:
             FROM notebook_pages np
             JOIN notebook_sections ns ON np.section_id = ns.id
             JOIN job_notebooks jn ON ns.notebook_id = jn.id
-            WHERE np.title LIKE ? OR np.content LIKE ?
+            WHERE np.title LIKE ? ESCAPE '\\' OR np.content LIKE ? ESCAPE '\\'
             ORDER BY np.updated_at DESC
             LIMIT 10
         """, (q, q))
@@ -4155,7 +4493,10 @@ class Repository:
 
             UNION ALL
 
-            SELECT 'transferred' AS event,
+            SELECT CASE tt.direction
+                        WHEN 'return' THEN 'returned'
+                        ELSE 'transferred'
+                   END AS event,
                    tt.created_at AS event_at,
                    tt.quantity,
                    tt.direction AS allocate_to,
@@ -4234,31 +4575,76 @@ class Repository:
     def create_job_update(
         self, job_id: int, user_id: int, message: str,
         update_type: str = "comment", photos: str = "[]",
+        recipient_id: int = None,
     ) -> int:
-        """Post a comment or update on a job."""
+        """Post a comment, chat message, or DM on a job.
+
+        Automatically parses @mentions and creates notifications.
+        """
         with self.db.get_connection() as conn:
             cursor = conn.execute(
                 "INSERT INTO job_updates "
-                "(job_id, user_id, message, update_type, photos) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (job_id, user_id, message, update_type, photos),
+                "(job_id, user_id, message, update_type, photos, recipient_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, user_id, message, update_type, photos, recipient_id),
             )
-            return cursor.lastrowid
+            update_id = cursor.lastrowid
+
+        # Parse @mentions and create targeted notifications
+        if update_type in ("chat", "comment", "dm"):
+            self._process_mentions(job_id, user_id, message, update_id)
+
+        return update_id
+
+    def _process_mentions(
+        self, job_id: int, sender_id: int, message: str, update_id: int,
+    ):
+        """Parse @username mentions from a message and create notifications."""
+        import re
+        mentions = re.findall(r"@(\w+)", message)
+        if not mentions:
+            return
+
+        sender = self.get_user_by_id(sender_id)
+        sender_name = sender.display_name if sender else f"User #{sender_id}"
+        job = self.get_job_by_id(job_id)
+        job_label = job.job_number if job else f"Job #{job_id}"
+
+        for username in set(mentions):  # deduplicate
+            user = self.get_user_by_username(username)
+            if user and user.id != sender_id:
+                self.create_notification(Notification(
+                    user_id=user.id,
+                    title="Mentioned",
+                    message=(
+                        f"{sender_name} mentioned you in {job_label}: "
+                        f"\"{message[:80]}{'...' if len(message) > 80 else ''}\""
+                    ),
+                    severity="info",
+                    source="chat",
+                    target_tab="jobs",
+                    target_data=str(job_id),
+                ))
 
     def get_job_updates(
         self, job_id: int, limit: int = 50
     ) -> list:
-        """Get updates/comments for a job, pinned first then by date."""
+        """Get updates/comments for a job, pinned first then by date.
+
+        Excludes DMs — use get_job_dms for those.
+        """
         from wired_part.database.models import JobUpdate
 
         rows = self.db.execute("""
             SELECT ju.*,
                    COALESCE(u.display_name, '') AS user_name,
-                   j.job_number, j.name AS job_name
+                   j.job_number, j.name AS job_name,
+                   COALESCE(r.display_name, '') AS recipient_name
             FROM job_updates ju
             LEFT JOIN users u ON ju.user_id = u.id
             LEFT JOIN jobs j ON ju.job_id = j.id
-            WHERE ju.job_id = ?
+            LEFT JOIN users r ON ju.recipient_id = r.id
+            WHERE ju.job_id = ? AND ju.update_type != 'dm'
             ORDER BY ju.is_pinned DESC, ju.created_at DESC, ju.id DESC
             LIMIT ?
         """, (job_id, limit))
@@ -4271,16 +4657,22 @@ class Repository:
         ]
 
     def get_latest_updates_across_jobs(self, limit: int = 20) -> list:
-        """Get the most recent job updates across all jobs (for dashboard)."""
+        """Get the most recent job updates across all jobs (for dashboard).
+
+        Excludes DMs for privacy.
+        """
         from wired_part.database.models import JobUpdate
 
         rows = self.db.execute("""
             SELECT ju.*,
                    COALESCE(u.display_name, '') AS user_name,
-                   j.job_number, j.name AS job_name
+                   j.job_number, j.name AS job_name,
+                   COALESCE(r.display_name, '') AS recipient_name
             FROM job_updates ju
             LEFT JOIN users u ON ju.user_id = u.id
             LEFT JOIN jobs j ON ju.job_id = j.id
+            LEFT JOIN users r ON ju.recipient_id = r.id
+            WHERE ju.update_type != 'dm'
             ORDER BY ju.created_at DESC, ju.id DESC
             LIMIT ?
         """, (limit,))
@@ -4306,3 +4698,998 @@ class Repository:
             conn.execute(
                 "DELETE FROM job_updates WHERE id = ?", (update_id,)
             )
+
+    def edit_job_update(
+        self, update_id: int, new_message: str, editor_id: int = None,
+    ):
+        """Edit the message text of an existing job update / chat message.
+
+        Logs the old message to activity_log for edit history.
+        """
+        import json
+        # Capture old message for history
+        old_rows = self.db.execute(
+            "SELECT message FROM job_updates WHERE id = ?", (update_id,)
+        )
+        old_message = old_rows[0]["message"] if old_rows else ""
+
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE job_updates SET message = ?, edited_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (new_message, update_id),
+            )
+
+        # Log edit in activity_log for history
+        self.log_activity(
+            user_id=editor_id,
+            action="updated",
+            entity_type="job_update",
+            entity_id=update_id,
+            details=json.dumps({"old_message": old_message, "new_message": new_message}),
+        )
+
+    def get_edit_history(self, update_id: int) -> list[dict]:
+        """Get edit history for a job update from the activity log.
+
+        Returns list of dicts with editor, old_message, new_message, timestamp.
+        """
+        import json
+        rows = self.db.execute("""
+            SELECT al.*, COALESCE(u.display_name, '') AS user_name
+            FROM activity_log al
+            LEFT JOIN users u ON al.user_id = u.id
+            WHERE al.entity_type = 'job_update'
+              AND al.entity_id = ?
+              AND al.action = 'updated'
+            ORDER BY al.created_at DESC, al.id DESC
+        """, (update_id,))
+        history = []
+        for r in rows:
+            details = {}
+            try:
+                details = json.loads(r["details"]) if r["details"] else {}
+            except (json.JSONDecodeError, TypeError):
+                pass
+            history.append({
+                "editor": r["user_name"],
+                "old_message": details.get("old_message", ""),
+                "new_message": details.get("new_message", ""),
+                "edited_at": r["created_at"],
+            })
+        return history
+
+    # ── Job Chat (group) ──────────────────────────────────────────
+
+    def send_chat_message(
+        self, job_id: int, user_id: int, message: str,
+        photos: str = "[]",
+    ) -> int:
+        """Send a group chat message on a job (visible to all assigned members)."""
+        return self.create_job_update(
+            job_id=job_id, user_id=user_id, message=message,
+            update_type="chat", photos=photos,
+        )
+
+    def get_job_chat(
+        self, job_id: int, limit: int = 100, offset: int = 0,
+    ) -> list:
+        """Get group chat messages for a job, oldest first (chat order)."""
+        from wired_part.database.models import JobUpdate
+
+        rows = self.db.execute("""
+            SELECT ju.*,
+                   COALESCE(u.display_name, '') AS user_name,
+                   j.job_number, j.name AS job_name,
+                   '' AS recipient_name
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            LEFT JOIN jobs j ON ju.job_id = j.id
+            WHERE ju.job_id = ? AND ju.update_type = 'chat'
+            ORDER BY ju.created_at ASC, ju.id ASC
+            LIMIT ? OFFSET ?
+        """, (job_id, limit, offset))
+        return [
+            JobUpdate(**{
+                k: r[k] for k in r.keys()
+                if k in JobUpdate.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    # ── Job DMs (direct messages) ─────────────────────────────────
+
+    def send_dm(
+        self, job_id: int, sender_id: int, recipient_id: int,
+        message: str, photos: str = "[]",
+    ) -> int:
+        """Send a direct message between two job members."""
+        if sender_id == recipient_id:
+            raise ValueError("Cannot send a DM to yourself.")
+        return self.create_job_update(
+            job_id=job_id, user_id=sender_id, message=message,
+            update_type="dm", photos=photos, recipient_id=recipient_id,
+        )
+
+    def get_job_dms(
+        self, job_id: int, user_a: int, user_b: int,
+        limit: int = 100, offset: int = 0,
+    ) -> list:
+        """Get DM conversation between two users on a job, oldest first."""
+        from wired_part.database.models import JobUpdate
+
+        rows = self.db.execute("""
+            SELECT ju.*,
+                   COALESCE(u.display_name, '') AS user_name,
+                   j.job_number, j.name AS job_name,
+                   COALESCE(r.display_name, '') AS recipient_name
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            LEFT JOIN jobs j ON ju.job_id = j.id
+            LEFT JOIN users r ON ju.recipient_id = r.id
+            WHERE ju.job_id = ? AND ju.update_type = 'dm'
+              AND (
+                (ju.user_id = ? AND ju.recipient_id = ?)
+                OR (ju.user_id = ? AND ju.recipient_id = ?)
+              )
+            ORDER BY ju.created_at ASC, ju.id ASC
+            LIMIT ? OFFSET ?
+        """, (job_id, user_a, user_b, user_b, user_a, limit, offset))
+        return [
+            JobUpdate(**{
+                k: r[k] for k in r.keys()
+                if k in JobUpdate.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    def get_dm_contacts(self, job_id: int, user_id: int) -> list[dict]:
+        """Get list of users this person has DM'd with on a job.
+
+        Returns a list of dicts with user_id, display_name, and last_message_at.
+        """
+        rows = self.db.execute("""
+            SELECT
+                CASE WHEN ju.user_id = ? THEN ju.recipient_id
+                     ELSE ju.user_id END AS contact_id,
+                MAX(ju.created_at) AS last_message_at
+            FROM job_updates ju
+            WHERE ju.job_id = ? AND ju.update_type = 'dm'
+              AND (ju.user_id = ? OR ju.recipient_id = ?)
+            GROUP BY contact_id
+            ORDER BY last_message_at DESC
+        """, (user_id, job_id, user_id, user_id))
+
+        contacts = []
+        for r in rows:
+            contact = self.get_user_by_id(r["contact_id"])
+            contacts.append({
+                "user_id": r["contact_id"],
+                "display_name": contact.display_name if contact else "Unknown",
+                "last_message_at": r["last_message_at"],
+            })
+        return contacts
+
+    def mark_dms_read(self, job_id: int, reader_id: int, sender_id: int):
+        """Mark all DMs from sender_id to reader_id as read on a job."""
+        with self.db.get_connection() as conn:
+            conn.execute("""
+                UPDATE job_updates
+                SET is_read = 1
+                WHERE job_id = ? AND update_type = 'dm'
+                  AND user_id = ? AND recipient_id = ?
+                  AND is_read = 0
+            """, (job_id, sender_id, reader_id))
+
+    def get_unread_dm_count(self, job_id: int, user_id: int) -> int:
+        """Count unread DMs for a user on a specific job."""
+        rows = self.db.execute("""
+            SELECT COUNT(*) AS cnt FROM job_updates
+            WHERE job_id = ? AND update_type = 'dm'
+              AND recipient_id = ? AND is_read = 0
+        """, (job_id, user_id))
+        return rows[0]["cnt"] if rows else 0
+
+    def get_total_unread_dm_count(self, user_id: int) -> int:
+        """Count unread DMs for a user across ALL jobs."""
+        rows = self.db.execute("""
+            SELECT COUNT(*) AS cnt FROM job_updates
+            WHERE update_type = 'dm'
+              AND recipient_id = ? AND is_read = 0
+        """, (user_id,))
+        return rows[0]["cnt"] if rows else 0
+
+    # ── Job timeline ──────────────────────────────────────────────
+
+    def get_job_timeline(
+        self, job_id: int, limit: int = 50, offset: int = 0,
+    ) -> list[dict]:
+        """Unified timeline of labor entries, chat messages, and updates for a job.
+
+        Returns a list of dicts sorted by created_at DESC, each with:
+            type: "labor" | "chat" | "update" | "dm"
+            id, user_name, message/description, created_at, metadata
+        """
+        from wired_part.database.models import JobUpdate
+
+        timeline: list[dict] = []
+        # Fetch enough from each source to fill limit+offset after merge
+        fetch_limit = limit + offset
+
+        # 1. Labor entries
+        labor_rows = self.db.execute("""
+            SELECT le.id, le.user_id, u.display_name AS user_name,
+                   le.start_time AS created_at,
+                   le.description, le.hours, le.sub_task_category,
+                   CASE WHEN le.end_time IS NULL THEN 1 ELSE 0 END AS is_active
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            WHERE le.job_id = ?
+            ORDER BY le.start_time DESC
+            LIMIT ?
+        """, (job_id, fetch_limit))
+        for r in labor_rows:
+            desc = r["description"] or ""
+            hours_str = f" ({r['hours']:.1f}h)" if r["hours"] else ""
+            status = " [active]" if r["is_active"] else ""
+            timeline.append({
+                "type": "labor",
+                "id": r["id"],
+                "user_name": r["user_name"],
+                "message": f"{r['sub_task_category']}{hours_str}{status}"
+                           + (f" — {desc}" if desc else ""),
+                "created_at": r["created_at"],
+            })
+
+        # 2. Job updates + chat (exclude DMs for privacy)
+        update_rows = self.db.execute("""
+            SELECT ju.id, ju.user_id,
+                   COALESCE(u.display_name, '') AS user_name,
+                   ju.update_type, ju.message, ju.is_pinned,
+                   ju.created_at
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            WHERE ju.job_id = ? AND ju.update_type != 'dm'
+            ORDER BY ju.created_at DESC
+            LIMIT ?
+        """, (job_id, fetch_limit))
+        for r in update_rows:
+            ttype = "chat" if r["update_type"] == "chat" else "update"
+            pin = " [pinned]" if r["is_pinned"] else ""
+            timeline.append({
+                "type": ttype,
+                "id": r["id"],
+                "user_name": r["user_name"],
+                "message": r["message"] + pin,
+                "created_at": r["created_at"],
+            })
+
+        # Sort everything by created_at descending, then slice
+        timeline.sort(
+            key=lambda x: x.get("created_at") or "", reverse=True
+        )
+        return timeline[offset:offset + limit]
+
+    # ── Chat search ───────────────────────────────────────────────
+
+    def search_job_chat(
+        self, job_id: int, query: str, limit: int = 50,
+    ) -> list:
+        """Search chat and update messages on a job by keyword."""
+        from wired_part.database.models import JobUpdate
+
+        escaped = self._escape_like(query)
+        rows = self.db.execute("""
+            SELECT ju.*,
+                   COALESCE(u.display_name, '') AS user_name,
+                   j.job_number, j.name AS job_name,
+                   COALESCE(r.display_name, '') AS recipient_name
+            FROM job_updates ju
+            LEFT JOIN users u ON ju.user_id = u.id
+            LEFT JOIN jobs j ON ju.job_id = j.id
+            LEFT JOIN users r ON ju.recipient_id = r.id
+            WHERE ju.job_id = ? AND ju.update_type != 'dm'
+              AND ju.message LIKE ? ESCAPE '\\'
+            ORDER BY ju.created_at DESC, ju.id DESC
+            LIMIT ?
+        """, (job_id, f"%{escaped}%", limit))
+        return [
+            JobUpdate(**{
+                k: r[k] for k in r.keys()
+                if k in JobUpdate.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+    # ── Message reactions ─────────────────────────────────────────
+
+    def add_reaction(self, update_id: int, user_id: int, emoji: str):
+        """Add an emoji reaction to a job update / chat message.
+
+        Reactions are stored as JSON: {"emoji": [user_id, ...]}
+        """
+        import json
+        rows = self.db.execute(
+            "SELECT reactions FROM job_updates WHERE id = ?", (update_id,)
+        )
+        if not rows:
+            raise ValueError(f"Job update {update_id} not found")
+
+        raw = rows[0]["reactions"] or "{}"
+        try:
+            reactions = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            reactions = {}
+
+        user_list = reactions.get(emoji, [])
+        if user_id not in user_list:
+            user_list.append(user_id)
+        reactions[emoji] = user_list
+
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE job_updates SET reactions = ? WHERE id = ?",
+                (json.dumps(reactions), update_id),
+            )
+
+    def remove_reaction(self, update_id: int, user_id: int, emoji: str):
+        """Remove a user's emoji reaction from a job update."""
+        import json
+        rows = self.db.execute(
+            "SELECT reactions FROM job_updates WHERE id = ?", (update_id,)
+        )
+        if not rows:
+            raise ValueError(f"Job update {update_id} not found")
+
+        raw = rows[0]["reactions"] or "{}"
+        try:
+            reactions = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            reactions = {}
+
+        user_list = reactions.get(emoji, [])
+        if user_id in user_list:
+            user_list.remove(user_id)
+        if user_list:
+            reactions[emoji] = user_list
+        else:
+            reactions.pop(emoji, None)
+
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "UPDATE job_updates SET reactions = ? WHERE id = ?",
+                (json.dumps(reactions), update_id),
+            )
+
+    def get_reactions(self, update_id: int) -> dict:
+        """Get all reactions for a job update as {emoji: [user_ids]}."""
+        import json
+        rows = self.db.execute(
+            "SELECT reactions FROM job_updates WHERE id = ?", (update_id,)
+        )
+        if not rows:
+            return {}
+        raw = rows[0]["reactions"] or "{}"
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    # ── Dashboard / Analytics (Loops 21-25) ───────────────────────
+
+    def get_dashboard_summary(self) -> dict:
+        """Aggregate dashboard data: active jobs, clocked-in users,
+        pending orders, unread notifications, and low-stock count."""
+        active_jobs = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'active'"
+        )
+        clocked_in = self.db.execute(
+            "SELECT COUNT(DISTINCT user_id) AS cnt "
+            "FROM labor_entries WHERE end_time IS NULL"
+        )
+        pending_orders = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM purchase_orders "
+            "WHERE status IN ('draft', 'submitted', 'partial')"
+        )
+        low_stock = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM parts "
+            "WHERE quantity < min_quantity AND min_quantity > 0"
+        )
+        return {
+            "active_jobs": active_jobs[0]["cnt"] if active_jobs else 0,
+            "clocked_in_users": clocked_in[0]["cnt"] if clocked_in else 0,
+            "pending_orders": pending_orders[0]["cnt"] if pending_orders else 0,
+            "low_stock_parts": low_stock[0]["cnt"] if low_stock else 0,
+        }
+
+    def get_low_stock_alerts(self) -> list[dict]:
+        """Parts and truck inventory items below their minimum quantity.
+
+        Returns combined list sorted by urgency (how far below min).
+        """
+        # Warehouse low stock
+        warehouse = self.db.execute("""
+            SELECT p.id, p.part_number, p.name, p.quantity, p.min_quantity,
+                   'warehouse' AS location,
+                   '' AS location_name,
+                   (p.min_quantity - p.quantity) AS deficit
+            FROM parts p
+            WHERE p.quantity < p.min_quantity AND p.min_quantity > 0
+            ORDER BY deficit DESC
+        """)
+        # Truck low stock
+        truck = self.db.execute("""
+            SELECT p.id AS id, p.part_number, p.name,
+                   ti.quantity, ti.min_quantity,
+                   'truck' AS location,
+                   t.truck_number AS location_name,
+                   (ti.min_quantity - ti.quantity) AS deficit
+            FROM truck_inventory ti
+            JOIN parts p ON ti.part_id = p.id
+            JOIN trucks t ON ti.truck_id = t.id
+            WHERE ti.quantity < ti.min_quantity AND ti.min_quantity > 0
+            ORDER BY deficit DESC
+        """)
+        alerts = [dict(r) for r in warehouse] + [dict(r) for r in truck]
+        alerts.sort(key=lambda x: x["deficit"], reverse=True)
+        return alerts
+
+    def get_spending_by_supplier(
+        self, date_from: str = None, date_to: str = None,
+    ) -> list[dict]:
+        """Total spending per supplier from received order items.
+
+        Returns [{supplier_name, supplier_id, total_spent, item_count}].
+        """
+        conditions = ["rl.quantity_received > 0"]
+        params: list = []
+        if date_from:
+            conditions.append("DATE(rl.received_at) >= ?")
+            params.append(date_from[:10])
+        if date_to:
+            conditions.append("DATE(rl.received_at) <= ?")
+            params.append(date_to[:10])
+        where = " AND ".join(conditions)
+
+        rows = self.db.execute(f"""
+            SELECT s.id AS supplier_id,
+                   s.name AS supplier_name,
+                   COALESCE(SUM(rl.quantity_received * oi.unit_cost), 0) AS total_spent,
+                   COUNT(DISTINCT rl.id) AS item_count
+            FROM receive_log rl
+            JOIN purchase_order_items oi ON rl.order_item_id = oi.id
+            JOIN purchase_orders po ON oi.order_id = po.id
+            JOIN suppliers s ON po.supplier_id = s.id
+            WHERE {where}
+            GROUP BY s.id
+            ORDER BY total_spent DESC
+        """, tuple(params))
+        return [dict(r) for r in rows]
+
+    def get_labor_analytics(
+        self, job_id: int = None, date_from: str = None, date_to: str = None,
+    ) -> dict:
+        """Labor analytics: hours by user, by category, and totals.
+
+        Returns {total_hours, total_entries, by_user: [...], by_category: [...]}.
+        """
+        conditions = ["le.end_time IS NOT NULL"]
+        params: list = []
+        if job_id is not None:
+            conditions.append("le.job_id = ?")
+            params.append(job_id)
+        if date_from:
+            conditions.append("DATE(le.start_time) >= ?")
+            params.append(date_from[:10])
+        if date_to:
+            conditions.append("DATE(le.start_time) <= ?")
+            params.append(date_to[:10])
+        where = " AND ".join(conditions)
+
+        # Totals
+        totals_rows = self.db.execute(f"""
+            SELECT COALESCE(SUM(le.hours), 0) AS total_hours,
+                   COUNT(*) AS total_entries
+            FROM labor_entries le
+            WHERE {where}
+        """, tuple(params))
+        totals = dict(totals_rows[0]) if totals_rows else {
+            "total_hours": 0, "total_entries": 0
+        }
+
+        # By user
+        by_user_rows = self.db.execute(f"""
+            SELECT u.display_name, le.user_id,
+                   COALESCE(SUM(le.hours), 0) AS hours,
+                   COUNT(*) AS entries
+            FROM labor_entries le
+            JOIN users u ON le.user_id = u.id
+            WHERE {where}
+            GROUP BY le.user_id
+            ORDER BY hours DESC
+        """, tuple(params))
+
+        # By category
+        by_cat_rows = self.db.execute(f"""
+            SELECT le.sub_task_category AS category,
+                   COALESCE(SUM(le.hours), 0) AS hours,
+                   COUNT(*) AS entries
+            FROM labor_entries le
+            WHERE {where}
+            GROUP BY le.sub_task_category
+            ORDER BY hours DESC
+        """, tuple(params))
+
+        totals["by_user"] = [dict(r) for r in by_user_rows]
+        totals["by_category"] = [dict(r) for r in by_cat_rows]
+        return totals
+
+    def get_truck_utilization(self) -> list[dict]:
+        """Get utilization metrics for all trucks.
+
+        Returns list of dicts with truck info, inventory value, unique parts,
+        pending transfers count.
+        """
+        rows = self.db.execute("""
+            SELECT t.id, t.truck_number, t.name,
+                   COALESCE(u.display_name, '') AS assigned_to,
+                   (SELECT COUNT(*) FROM truck_inventory ti
+                    WHERE ti.truck_id = t.id AND ti.quantity > 0) AS unique_parts,
+                   (SELECT COALESCE(SUM(ti.quantity), 0)
+                    FROM truck_inventory ti
+                    WHERE ti.truck_id = t.id) AS total_quantity,
+                   (SELECT COALESCE(SUM(ti.quantity * p.unit_cost), 0)
+                    FROM truck_inventory ti
+                    JOIN parts p ON ti.part_id = p.id
+                    WHERE ti.truck_id = t.id) AS inventory_value,
+                   (SELECT COUNT(*) FROM truck_transfers tt
+                    WHERE tt.truck_id = t.id AND tt.status = 'pending') AS pending_transfers
+            FROM trucks t
+            LEFT JOIN users u ON t.assigned_user_id = u.id
+            ORDER BY inventory_value DESC
+        """)
+        return [dict(r) for r in rows]
+
+    # ── Loop 26: Paginated parts listing ──────────────────────────────
+
+    _PARTS_SORT_COLUMNS = {
+        "part_number": "p.part_number",
+        "name": "p.name",
+        "quantity": "p.quantity",
+        "unit_cost": "p.unit_cost",
+        "category": "category_name",
+        "min_quantity": "p.min_quantity",
+    }
+
+    def get_parts_paginated(
+        self,
+        *,
+        sort_by: str = "part_number",
+        sort_order: str = "asc",
+        limit: int = 50,
+        offset: int = 0,
+        category_id: Optional[int] = None,
+        low_stock_only: bool = False,
+    ) -> dict:
+        """Return paginated, sortable, filterable parts list.
+
+        Returns dict with keys: items, total_count, limit, offset.
+        """
+        col = self._PARTS_SORT_COLUMNS.get(sort_by, "p.part_number")
+        direction = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+        where_clauses = []
+        params: list = []
+
+        if category_id is not None:
+            where_clauses.append("p.category_id = ?")
+            params.append(category_id)
+        if low_stock_only:
+            where_clauses.append(
+                "p.min_quantity > 0 AND p.quantity < p.min_quantity"
+            )
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        # Total count for pagination
+        count_row = self.db.execute(
+            f"SELECT COUNT(*) AS cnt FROM parts p{where_sql}",
+            tuple(params),
+        )
+        total_count = count_row[0]["cnt"] if count_row else 0
+
+        # Fetch page
+        rows = self.db.execute(
+            self._PARTS_SELECT + where_sql
+            + f" ORDER BY {col} {direction}, p.id DESC"
+            + " LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
+        )
+        items = [Part(**dict(r)) for r in rows]
+
+        return {
+            "items": items,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    # ── Loop 27: Paginated jobs listing ───────────────────────────────
+
+    _JOBS_SORT_COLUMNS = {
+        "job_number": "job_number",
+        "name": "name",
+        "customer": "customer",
+        "status": "status",
+        "priority": "priority",
+        "created_at": "created_at",
+    }
+
+    def get_jobs_paginated(
+        self,
+        *,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+        customer: Optional[str] = None,
+    ) -> dict:
+        """Return paginated, sortable, filterable jobs list."""
+        col = self._JOBS_SORT_COLUMNS.get(sort_by, "created_at")
+        direction = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+        where_clauses = []
+        params: list = []
+
+        if status and status != "all":
+            where_clauses.append("status = ?")
+            params.append(status)
+        if customer:
+            escaped = self._escape_like(customer)
+            where_clauses.append("customer LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        count_row = self.db.execute(
+            f"SELECT COUNT(*) AS cnt FROM jobs{where_sql}",
+            tuple(params),
+        )
+        total_count = count_row[0]["cnt"] if count_row else 0
+
+        rows = self.db.execute(
+            f"SELECT * FROM jobs{where_sql}"
+            f" ORDER BY {col} {direction}, id DESC"
+            " LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
+        )
+        items = [Job(**dict(r)) for r in rows]
+
+        return {
+            "items": items,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    # ── Loop 28: Paginated orders listing ─────────────────────────────
+
+    _ORDERS_SORT_COLUMNS = {
+        "order_number": "po.order_number",
+        "supplier": "supplier_name",
+        "status": "po.status",
+        "created_at": "po.created_at",
+        "total_cost": "total_cost",
+    }
+
+    def get_orders_paginated(
+        self,
+        *,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+        supplier_id: Optional[int] = None,
+    ) -> dict:
+        """Return paginated, sortable, filterable purchase orders."""
+        col = self._ORDERS_SORT_COLUMNS.get(sort_by, "po.created_at")
+        direction = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+        base = """SELECT po.*,
+                s.name AS supplier_name,
+                COALESCE(u.display_name, '') AS created_by_name,
+                COALESCE(pl.name, '') AS parts_list_name,
+                COALESCE(agg.item_count, 0) AS item_count,
+                COALESCE(agg.total_cost, 0.0) AS total_cost
+            FROM purchase_orders po
+            JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            LEFT JOIN parts_lists pl ON po.parts_list_id = pl.id
+            LEFT JOIN (
+                SELECT order_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_ordered * unit_cost) AS total_cost
+                FROM purchase_order_items
+                GROUP BY order_id
+            ) agg ON agg.order_id = po.id"""
+
+        where_clauses = []
+        params: list = []
+
+        if status:
+            where_clauses.append("po.status = ?")
+            params.append(status)
+        if supplier_id is not None:
+            where_clauses.append("po.supplier_id = ?")
+            params.append(supplier_id)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        count_sql = (
+            "SELECT COUNT(*) AS cnt FROM purchase_orders po"
+            + (" WHERE " + " AND ".join(where_clauses) if where_clauses else "")
+        )
+        count_row = self.db.execute(count_sql, tuple(params))
+        total_count = count_row[0]["cnt"] if count_row else 0
+
+        rows = self.db.execute(
+            base + where_sql
+            + f" ORDER BY {col} {direction}, po.id DESC"
+            + " LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
+        )
+        items = [
+            PurchaseOrder(**{
+                k: r[k] for k in r.keys()
+                if k in PurchaseOrder.__dataclass_fields__
+            })
+            for r in rows
+        ]
+
+        return {
+            "items": items,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    # ── Loop 29: Return pipeline summary ──────────────────────────────
+
+    def get_return_pipeline_summary(self) -> dict:
+        """Return aggregate statistics for the return authorization pipeline.
+
+        Returns dict with:
+        - by_status: {status: {count, total_value}}
+        - total_returns, total_value
+        - aging: list of RAs older than 30 days still open
+        """
+        # Counts and values by status
+        rows = self.db.execute("""
+            SELECT ra.status,
+                   COUNT(*) AS cnt,
+                   COALESCE(SUM(
+                       (SELECT COALESCE(SUM(rai.quantity * rai.unit_cost), 0)
+                        FROM return_authorization_items rai
+                        WHERE rai.ra_id = ra.id)
+                   ), 0) AS total_value
+            FROM return_authorizations ra
+            GROUP BY ra.status
+        """)
+
+        by_status = {}
+        total_returns = 0
+        total_value = 0.0
+        for r in rows:
+            by_status[r["status"]] = {
+                "count": r["cnt"],
+                "total_value": round(r["total_value"], 2),
+            }
+            total_returns += r["cnt"]
+            total_value += r["total_value"]
+
+        # Aging: open RAs older than 30 days
+        aging_rows = self.db.execute("""
+            SELECT ra.id, ra.ra_number, ra.status, ra.created_at,
+                   s.name AS supplier_name,
+                   julianday('now') - julianday(ra.created_at) AS age_days
+            FROM return_authorizations ra
+            JOIN suppliers s ON ra.supplier_id = s.id
+            WHERE ra.status IN ('initiated', 'picked_up')
+              AND julianday('now') - julianday(ra.created_at) > 30
+            ORDER BY age_days DESC
+        """)
+        aging = [dict(r) for r in aging_rows]
+
+        return {
+            "by_status": by_status,
+            "total_returns": total_returns,
+            "total_value": round(total_value, 2),
+            "aging": aging,
+        }
+
+    # ── Loop 30: App-wide statistics ──────────────────────────────────
+
+    def get_app_statistics(self) -> dict:
+        """Return comprehensive application-wide statistics.
+
+        Useful for settings/about page, system health checks.
+        """
+        stats = {}
+
+        def _row(result):
+            """Convert first row to dict, or empty dict if no results."""
+            return dict(result[0]) if result else {}
+
+        # Parts
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "COALESCE(SUM(quantity), 0) AS total_qty, "
+            "COALESCE(SUM(quantity * unit_cost), 0) AS total_value "
+            "FROM parts"
+        ))
+        stats["parts"] = {
+            "count": row.get("cnt", 0),
+            "total_quantity": row.get("total_qty", 0),
+            "total_value": round(row.get("total_value", 0), 2),
+        }
+
+        # Jobs
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, "
+            "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed "
+            "FROM jobs"
+        ))
+        stats["jobs"] = {
+            "count": row.get("cnt", 0),
+            "active": row.get("active", 0) or 0,
+            "completed": row.get("completed", 0) or 0,
+        }
+
+        # Users
+        row = _row(self.db.execute("SELECT COUNT(*) AS cnt FROM users"))
+        stats["users"] = {"count": row.get("cnt", 0)}
+
+        # Trucks
+        row = _row(self.db.execute("SELECT COUNT(*) AS cnt FROM trucks"))
+        stats["trucks"] = {"count": row.get("cnt", 0)}
+
+        # Suppliers
+        row = _row(self.db.execute("SELECT COUNT(*) AS cnt FROM suppliers"))
+        stats["suppliers"] = {"count": row.get("cnt", 0)}
+
+        # Purchase orders
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "SUM(CASE WHEN status IN ('draft', 'submitted') THEN 1 ELSE 0 END) AS open_orders "
+            "FROM purchase_orders"
+        ))
+        stats["orders"] = {
+            "count": row.get("cnt", 0),
+            "open": row.get("open_orders", 0) or 0,
+        }
+
+        # Labor entries
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "COALESCE(SUM(hours), 0) AS total_hours "
+            "FROM labor_entries"
+        ))
+        stats["labor"] = {
+            "entries": row.get("cnt", 0),
+            "total_hours": round(row.get("total_hours", 0), 1),
+        }
+
+        # Transfers
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending "
+            "FROM truck_transfers"
+        ))
+        stats["transfers"] = {
+            "count": row.get("cnt", 0),
+            "pending": row.get("pending", 0) or 0,
+        }
+
+        # Return authorizations
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "SUM(CASE WHEN status IN ('initiated', 'picked_up') THEN 1 ELSE 0 END) AS open_returns "
+            "FROM return_authorizations"
+        ))
+        stats["returns"] = {
+            "count": row.get("cnt", 0),
+            "open": row.get("open_returns", 0) or 0,
+        }
+
+        # Notebook pages
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM notebook_pages"
+        ))
+        stats["notebooks"] = {"pages": row.get("cnt", 0)}
+
+        # Activity log
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM activity_log"
+        ))
+        stats["activity_log"] = {"entries": row.get("cnt", 0)}
+
+        # Notifications
+        row = _row(self.db.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS unread "
+            "FROM notifications"
+        ))
+        stats["notifications"] = {
+            "count": row.get("cnt", 0),
+            "unread": row.get("unread", 0) or 0,
+        }
+
+        return stats
+
+    # ── User Settings (v16) ─────────────────────────────────────
+
+    def get_or_create_user_settings(self, user_id: int) -> UserSettings:
+        """Get per-user settings, creating default row if none exists."""
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row:
+                data = {
+                    k: row[k] for k in row.keys()
+                    if k in UserSettings.__dataclass_fields__
+                }
+                return UserSettings(**data)
+            # Create default settings
+            conn.execute(
+                "INSERT INTO user_settings (user_id) VALUES (?)",
+                (user_id,),
+            )
+            row = conn.execute(
+                "SELECT * FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            data = {
+                k: row[k] for k in row.keys()
+                if k in UserSettings.__dataclass_fields__
+            }
+            return UserSettings(**data)
+
+    def update_user_settings(self, user_id: int, **kwargs) -> None:
+        """Update specific per-user settings fields.
+
+        Usage: repo.update_user_settings(user_id, theme="retro", font_size=12)
+        """
+        if not kwargs:
+            return
+        # Ensure user_settings row exists
+        self.get_or_create_user_settings(user_id)
+        # Build dynamic SET clause
+        set_parts: list[str] = []
+        values: list = []
+        for key, value in kwargs.items():
+            if key in UserSettings.__dataclass_fields__ and key not in (
+                "id", "user_id", "created_at", "updated_at",
+            ):
+                set_parts.append(f"{key} = ?")
+                values.append(value)
+        if not set_parts:
+            return
+        set_parts.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(user_id)
+        sql = (
+            f"UPDATE user_settings SET {', '.join(set_parts)} "
+            f"WHERE user_id = ?"
+        )
+        with self.db.get_connection() as conn:
+            conn.execute(sql, tuple(values))

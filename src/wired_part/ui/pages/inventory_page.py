@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wired_part.database.models import Part
+from wired_part.database.models import Part, User
 from wired_part.database.repository import Repository
 from wired_part.utils.formatters import format_currency
 
@@ -28,9 +28,14 @@ class InventoryPage(QWidget):
         "Category", "Unit Cost", "Supplier",
     ]
 
-    def __init__(self, repo: Repository):
+    def __init__(self, repo: Repository, current_user: User = None):
         super().__init__()
         self.repo = repo
+        self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._parts: list[Part] = []
         self._setup_ui()
         self.refresh()
@@ -82,6 +87,15 @@ class InventoryPage(QWidget):
         self.audit_btn.setToolTip("Quick card-swipe inventory audit")
         self.audit_btn.clicked.connect(self._on_audit)
         toolbar.addWidget(self.audit_btn)
+
+        # Apply permission visibility
+        p = self._perms
+        self.add_btn.setVisible("parts_add" in p)
+        self.import_btn.setVisible("parts_import" in p)
+        self.export_btn.setVisible("parts_export" in p)
+        self.lists_btn.setVisible("parts_lists" in p)
+        self.edit_btn.setVisible("parts_edit" in p)
+        self.delete_btn.setVisible("parts_delete" in p)
 
         layout.addLayout(toolbar)
 
@@ -153,7 +167,10 @@ class InventoryPage(QWidget):
                 QTableWidgetItem(str(part.min_quantity)),
                 QTableWidgetItem(part.location),
                 QTableWidgetItem(part.category_name),
-                QTableWidgetItem(format_currency(part.unit_cost)),
+                QTableWidgetItem(
+                    format_currency(part.unit_cost)
+                    if self._can_see_dollars else "—"
+                ),
                 QTableWidgetItem(part.supplier),
             ]
             # Highlight low stock in red
@@ -226,21 +243,30 @@ class InventoryPage(QWidget):
         part = self._selected_part()
         if not part:
             return
+
+        can_delete, reason = self.repo.can_delete_part(part.id)
+        if not can_delete:
+            QMessageBox.warning(
+                self, "Cannot Delete",
+                f"Cannot delete '{part.part_number}':\n{reason}",
+            )
+            return
+
         reply = QMessageBox.question(
             self,
             "Delete Part",
             f"Delete '{part.part_number} - {part.description}'?\n"
+            "This will also remove associated history records.\n\n"
             "This cannot be undone.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
             try:
-                self.repo.delete_part(part.id)
+                self.repo.delete_part(part.id, force=True)
                 self.refresh()
             except Exception as e:
                 QMessageBox.warning(
                     self, "Cannot Delete",
-                    f"Failed to delete part: {e}\n"
-                    "It may be assigned to active jobs.",
+                    f"Failed to delete part: {e}",
                 )

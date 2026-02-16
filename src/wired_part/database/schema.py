@@ -1,6 +1,6 @@
 """Database schema definition, initialization, and migrations."""
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 17
 
 # Each statement is a separate string to avoid executescript issues
 _SCHEMA_STATEMENTS = [
@@ -302,6 +302,8 @@ _SCHEMA_STATEMENTS = [
         rate_per_hour REAL DEFAULT 0.0,
         is_overtime INTEGER NOT NULL DEFAULT 0,
         bill_out_rate TEXT NOT NULL DEFAULT '',
+        drive_time_minutes INTEGER DEFAULT 0,
+        checkout_notes TEXT DEFAULT '{}',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -571,11 +573,36 @@ _SCHEMA_STATEMENTS = [
         message TEXT NOT NULL,
         update_type TEXT NOT NULL DEFAULT 'comment'
             CHECK (update_type IN ('comment', 'status_change',
-                                   'assignment', 'milestone')),
+                                   'assignment', 'milestone',
+                                   'chat', 'dm')),
         is_pinned INTEGER NOT NULL DEFAULT 0,
         photos TEXT DEFAULT '[]',
+        recipient_id INTEGER,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        edited_at TIMESTAMP,
+        reactions TEXT DEFAULT '{}',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE SET NULL
+    )""",
+
+    # User settings: per-user preferences (v16)
+    """CREATE TABLE IF NOT EXISTS user_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL UNIQUE,
+        theme TEXT DEFAULT 'dark',
+        font_size INTEGER DEFAULT 10,
+        dashboard_cards TEXT DEFAULT '[]',
+        default_truck_filter TEXT DEFAULT 'mine',
+        favorite_labor_categories TEXT DEFAULT '[]',
+        notification_mute_list TEXT DEFAULT '[]',
+        preferred_date_range TEXT DEFAULT 'This Period',
+        default_clock_in_job_id INTEGER DEFAULT NULL,
+        compact_mode INTEGER DEFAULT 0,
+        sidebar_collapsed INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
 
@@ -664,6 +691,9 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_job_updates_job ON job_updates(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_updates_user ON job_updates(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_job_updates_created ON job_updates(created_at)",
+
+    # v16 indexes: user settings
+    "CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)",
 
     # v10 indexes
     "CREATE INDEX IF NOT EXISTS idx_parts_deprecation ON parts(deprecation_status)",
@@ -779,6 +809,7 @@ _MIGRATION_V2_STATEMENTS = [
         quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
         min_quantity INTEGER NOT NULL DEFAULT 0,
         max_quantity INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
         FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
         UNIQUE(truck_id, part_id)
@@ -986,6 +1017,8 @@ _MIGRATION_V4_STATEMENTS = [
         rate_per_hour REAL DEFAULT 0.0,
         is_overtime INTEGER NOT NULL DEFAULT 0,
         bill_out_rate TEXT NOT NULL DEFAULT '',
+        drive_time_minutes INTEGER DEFAULT 0,
+        checkout_notes TEXT DEFAULT '{}',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -1850,6 +1883,120 @@ def _migrate_v12_to_v13(conn):
             pass
 
 
+def _migrate_v13_to_v14(conn):
+    """v13 → v14: Add updated_at to truck_inventory for sync LWW."""
+    stmts = [
+        "ALTER TABLE truck_inventory ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (14)",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+
+
+def _migrate_v14_to_v15(conn):
+    """v14 → v15: Add chat/DM columns to job_updates and widen CHECK constraint.
+
+    SQLite cannot ALTER a CHECK constraint, so we must recreate the table
+    to add the new 'chat' and 'dm' update_type values.
+    """
+    # Step 1: Rename old table
+    conn.execute("ALTER TABLE job_updates RENAME TO _job_updates_old")
+
+    # Step 2: Create new table with updated CHECK + new columns
+    conn.execute("""
+        CREATE TABLE job_updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            update_type TEXT NOT NULL DEFAULT 'comment'
+                CHECK (update_type IN ('comment', 'status_change',
+                                       'assignment', 'milestone',
+                                       'chat', 'dm')),
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            photos TEXT DEFAULT '[]',
+            recipient_id INTEGER,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            edited_at TIMESTAMP,
+            reactions TEXT DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Step 3: Copy existing data
+    conn.execute("""
+        INSERT INTO job_updates (id, job_id, user_id, message, update_type,
+            is_pinned, photos, created_at)
+        SELECT id, job_id, user_id, message, update_type,
+            is_pinned, photos, created_at
+        FROM _job_updates_old
+    """)
+
+    # Step 4: Drop old table
+    conn.execute("DROP TABLE _job_updates_old")
+
+    # Step 5: Recreate indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_updates_job ON job_updates(job_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_updates_user ON job_updates(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_updates_created ON job_updates(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_updates_recipient ON job_updates(recipient_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_updates_type ON job_updates(update_type)")
+
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (15)")
+
+
+def _migrate_v15_to_v16(conn):
+    """v15 → v16: Add user_settings table for per-user preferences."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS user_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            theme TEXT DEFAULT 'dark',
+            font_size INTEGER DEFAULT 10,
+            dashboard_cards TEXT DEFAULT '[]',
+            default_truck_filter TEXT DEFAULT 'mine',
+            favorite_labor_categories TEXT DEFAULT '[]',
+            notification_mute_list TEXT DEFAULT '[]',
+            preferred_date_range TEXT DEFAULT 'This Period',
+            default_clock_in_job_id INTEGER DEFAULT NULL,
+            compact_mode INTEGER DEFAULT 0,
+            sidebar_collapsed INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)",
+        # Rename permission: dashboard_view_value → show_dollar_values
+        "UPDATE hat_permissions SET permission_key = 'show_dollar_values' WHERE permission_key = 'dashboard_view_value'",
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (16)",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+
+
+def _migrate_v16_to_v17(conn):
+    """v16 → v17: Add drive_time_minutes and checkout_notes to labor_entries."""
+    stmts = [
+        "ALTER TABLE labor_entries ADD COLUMN drive_time_minutes INTEGER DEFAULT 0",
+        "ALTER TABLE labor_entries ADD COLUMN checkout_notes TEXT DEFAULT '{}'",
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (17)",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+
+
 def _ensure_required_columns(conn):
     """Safety net: ensure all required columns exist on every table.
 
@@ -1902,6 +2049,16 @@ def _ensure_required_columns(conn):
         ("job_parts", "source_order_id", "INTEGER"),
         # Receive log — v12 denormalized supplier
         ("receive_log", "supplier_id", "INTEGER"),
+        # Truck inventory — v14 sync LWW support
+        ("truck_inventory", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        # Labor entries — v17 clock-out enhancements
+        ("labor_entries", "drive_time_minutes", "INTEGER DEFAULT 0"),
+        ("labor_entries", "checkout_notes", "TEXT DEFAULT '{}'"),
+        # Job updates — v15 chat/DM columns
+        ("job_updates", "recipient_id", "INTEGER"),
+        ("job_updates", "is_read", "INTEGER NOT NULL DEFAULT 0"),
+        ("job_updates", "edited_at", "TIMESTAMP"),
+        ("job_updates", "reactions", "TEXT DEFAULT '{}'"),
     ]
 
     for table, column, definition in _REQUIRED_COLUMNS:
@@ -1971,6 +2128,14 @@ def initialize_database(db_connection):
                 _migrate_v11_to_v12(conn)
             if version < 13:
                 _migrate_v12_to_v13(conn)
+            if version < 14:
+                _migrate_v13_to_v14(conn)
+            if version < 15:
+                _migrate_v14_to_v15(conn)
+            if version < 16:
+                _migrate_v15_to_v16(conn)
+            if version < 17:
+                _migrate_v16_to_v17(conn)
 
         # Ensure all required columns exist (safety net for edge-case
         # migrations that may have silently failed on ALTER TABLE)

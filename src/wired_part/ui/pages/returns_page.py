@@ -44,6 +44,10 @@ class ReturnsPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._returns = []
         self._setup_ui()
         self.refresh()
@@ -79,6 +83,12 @@ class ReturnsPage(QWidget):
         self.delete_btn.clicked.connect(self._on_delete)
         self.delete_btn.setEnabled(False)
         toolbar.addWidget(self.delete_btn)
+
+        # Apply permission visibility
+        p = self._perms
+        self.new_btn.setVisible("orders_return" in p)
+        self.status_btn.setVisible("orders_return" in p)
+        self.delete_btn.setVisible("orders_return" in p)
 
         layout.addLayout(toolbar)
 
@@ -143,7 +153,10 @@ class ReturnsPage(QWidget):
                 QTableWidgetItem(status_label),
                 QTableWidgetItem(reason_label),
                 self._num_item(ra.item_count),
-                QTableWidgetItem(format_currency(ra.credit_amount)),
+                QTableWidgetItem(
+                    format_currency(ra.credit_amount)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(date_str),
                 QTableWidgetItem(ra.notes or ""),
             ]
@@ -157,9 +170,13 @@ class ReturnsPage(QWidget):
                 self.table.setItem(row, col, cell)
 
         self.table.setSortingEnabled(True)
+        credit_str = (
+            format_currency(total_credit)
+            if self._can_see_dollars else "\u2014"
+        )
         self.summary_label.setText(
             f"{len(returns)} returns  |  "
-            f"Total credit: {format_currency(total_credit)}"
+            f"Total credit: {credit_str}"
         )
 
     def _on_selection_changed(self):

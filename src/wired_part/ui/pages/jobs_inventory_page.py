@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from wired_part.database.models import User
 from wired_part.database.repository import Repository
 from wired_part.utils.formatters import format_currency
 
@@ -45,12 +46,13 @@ class _JobInventoryTab(QWidget):
     ]
 
     def __init__(self, repo: Repository, job_id: int, job_label: str,
-                 job_status: str):
+                 job_status: str, can_see_dollars: bool = True):
         super().__init__()
         self.repo = repo
         self.job_id = job_id
         self.job_label = job_label
         self.job_status = job_status
+        self._can_see_dollars = can_see_dollars
         self._parts: list = []
         self._setup_ui()
         self.refresh()
@@ -153,8 +155,14 @@ class _JobInventoryTab(QWidget):
                 QTableWidgetItem(jp.part_number),
                 QTableWidgetItem(jp.part_description),
                 self._num_item(jp.quantity_used),
-                QTableWidgetItem(format_currency(jp.unit_cost_at_use)),
-                QTableWidgetItem(format_currency(cost)),
+                QTableWidgetItem(
+                    format_currency(jp.unit_cost_at_use)
+                    if self._can_see_dollars else "\u2014"
+                ),
+                QTableWidgetItem(
+                    format_currency(cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(jp.notes or ""),
             ]
 
@@ -162,9 +170,13 @@ class _JobInventoryTab(QWidget):
                 self.table.setItem(row, col, cell)
 
         self.table.setSortingEnabled(True)
+        cost_str = (
+            format_currency(total_cost)
+            if self._can_see_dollars else "\u2014"
+        )
         self.summary_label.setText(
             f"{len(parts)} parts  |  {total_qty} total items  |  "
-            f"Cost: {format_currency(total_cost)}"
+            f"Cost: {cost_str}"
         )
 
     @staticmethod
@@ -186,9 +198,14 @@ class JobsInventoryPage(QWidget):
     - On Hold = Orange/Peach tab
     """
 
-    def __init__(self, repo: Repository):
+    def __init__(self, repo: Repository, current_user: User = None):
         super().__init__()
         self.repo = repo
+        self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._job_tabs: dict[int, _JobInventoryTab] = {}
         self._setup_ui()
         self.refresh()
@@ -289,7 +306,8 @@ class JobsInventoryPage(QWidget):
                 tab.refresh()
             else:
                 tab = _JobInventoryTab(
-                    self.repo, job.id, label, job.status
+                    self.repo, job.id, label, job.status,
+                    can_see_dollars=self._can_see_dollars,
                 )
 
             new_tab_map[job.id] = tab

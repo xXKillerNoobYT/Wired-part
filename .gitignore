@@ -24,6 +24,8 @@ venv/
 .idea/
 
 # Database & runtime settings
+*.db
+*.sqlite
 data/*.db
 data/backups/
 data/settings.json

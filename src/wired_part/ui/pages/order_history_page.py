@@ -42,6 +42,10 @@ class OrderHistoryPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._orders = []
         self._setup_ui()
         self.refresh()
@@ -216,7 +220,10 @@ class OrderHistoryPage(QWidget):
                 QTableWidgetItem(order.supplier_name),
                 QTableWidgetItem(status_label),
                 self._num_item(order.item_count),
-                QTableWidgetItem(format_currency(order.total_cost)),
+                QTableWidgetItem(
+                    format_currency(order.total_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(order.created_by_name),
                 QTableWidgetItem(submitted),
                 QTableWidgetItem(closed),
@@ -241,9 +248,13 @@ class OrderHistoryPage(QWidget):
         )
         self.total_spent_label.setText(
             f"Total Spent: {format_currency(analytics['total_spent'])}"
+            if self._can_see_dollars
+            else "Total Spent: \u2014"
         )
         self.avg_order_label.setText(
             f"Avg Order: {format_currency(analytics['avg_order_size'])}"
+            if self._can_see_dollars
+            else "Avg Order: \u2014"
         )
         self.top_supplier_label.setText(
             f"Top Supplier: {analytics['top_supplier']}"

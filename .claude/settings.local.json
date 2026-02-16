@@ -12,7 +12,23 @@
       "Bash(ls -la \"C:\\\\Users\\\\weird\\\\OneDrive\\\\Documents\\\\GitHub\\\\Wired-part\\\\src\\\\wired_part\\\\ui\\\\dialogs\"\" 2>&1 | grep -v \"^total \")",
       "Bash(ls:*)",
       "Bash(dir:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(python3:*)",
+      "Bash(find:*)",
+      "Bash(done)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Schema v12 — supply chain supplier tracking, activity log, job updates, global search\n\nSupply Chain Integrity \\(Phase 1\\):\n- Track supplier_id through entire part lifecycle: PO → receive_log →\n  truck_transfers → consumption_log → job_parts\n- Enforce one-supplier-per-part-per-job rule — raises ValueError if a\n  different supplier tries to supply the same part to the same job\n- Auto-detect supplier on manual warehouse→truck transfers\n- get_suggested_return_supplier\\(\\) for smart return-to-supplier workflow\n- get_part_supplier_chain\\(\\) for full audit trail across all movements\n\nNew Features:\n- Activity log \\(activity_log table\\) — audit trail for all user actions\n- Job updates/comments system \\(job_updates table\\) — team communication\n  with pinning, types \\(comment/status_change/assignment/milestone\\)\n- Global search \\(search_all\\) across jobs, parts, users, orders, notebooks\n- Office page, enhanced settings, part types/variants UI\n\nSchema Migration v11→v12:\n- truck_transfers: +source_order_id, +supplier_id columns\n- job_parts: +supplier_id, +source_order_id columns\n- consumption_log: +supplier_id, +source_order_id columns\n- receive_log: +supplier_id column\n- New tables: activity_log, job_updates\n- 13 new indexes for performance\n- Backfill SQL populates existing records from PO history\n\nTests: 635 passing \\(589 existing + 46 new\\)\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs: Add project documentation — architecture, supply chain, permissions, testing\n\nInitial documentation structure covering:\n- CHANGELOG.md — version history \\(v10, v11, v12\\)\n- ARCHITECTURE.md — system design, data flow, directory structure\n- SUPPLY_CHAIN.md — full part lifecycle with supplier tracking details\n- PERMISSIONS.md — hat system, 48+ permission keys, access levels\n- TESTING.md — test strategy, structure, writing guidelines\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Cross-platform foundation — GPS, fonts, DPI-aware sizing\n\nPhase 2: Cross-Platform Foundation\n\nGPS:\n- New cross-platform GPS module \\(utils/gps.py\\) with Windows \\(PowerShell\\),\n  macOS \\(CoreLocation\\), and Linux \\(GeoClue2\\) support\n- Graceful fallback to manual coordinate entry on all platforms\n- Replaced inline PowerShell code in clock_dialog.py and job_dialog.py\n  with shared fetch_gps\\(\\) calls\n\nFonts:\n- Platform-aware font selection \\(utils/platform.py\\): Segoe UI on\n  Windows, .AppleSystemUIFont on macOS, Ubuntu/Noto Sans on Linux\n- QSS templates use {{FONT_FAMILY}} placeholder resolved at runtime\n- app.py uses get_primary_font_name\\(\\) for QFont initialization\n\nDPI:\n- Converted dialog-level setFixedSize\\(\\) to setMinimumSize\\(\\) for\n  login, category, job assign, and truck dialogs\n\nTests: 671 passing \\(635 + 36 new cross-platform tests\\)\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Phase 3 — file-based cloud sync via user-selected folder\n\nAdd SyncManager for database synchronization between devices through\nany shared folder \\(Google Drive, OneDrive, Dropbox, local network\\).\nEach device exports/imports JSON sync files with last-write-wins merge\nstrategy, lock file management, and schema version checking. Config\nadditions: SYNC_ENABLED, SYNC_FOLDER_PATH, SYNC_INTERVAL_MINUTES,\nDEVICE_ID \\(auto-generated UUID\\), LAST_SYNC_TIMESTAMP.\n\n23 new tests — 694 total, all passing.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Phase 4 — notebook attachments, hyperlinks, and image embedding\n\nSchema v13 adds notebook_attachments table for file attachments per\nnotebook page. Rich text editor gains Insert Link \\(hyperlink dialog\\)\nand Insert Image \\(file picker with auto-scale\\) toolbar buttons.\nNotebook widget adds attachment panel with add/delete/open-with-system\nfunctionality. Cascade delete removes attachments when pages are deleted.\n\n12 new tests — 706 total, all passing.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(findstr:*)",
+      "Bash(Get-Content:*)",
+      "Bash(wc:*)",
+      "Bash(Out-String)"
     ]
   }
 }

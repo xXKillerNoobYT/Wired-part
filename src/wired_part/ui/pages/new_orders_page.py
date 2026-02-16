@@ -35,6 +35,10 @@ class NewOrdersPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._catalog_parts: list[Part] = []
         self._order_items: list[dict] = []  # {part, qty, job_id}
         self._setup_ui()
@@ -156,7 +160,11 @@ class NewOrdersPage(QWidget):
         mid_layout.addLayout(qty_row)
 
         # Summary + actions
-        self.order_summary = QLabel("0 items | Total: $0.00")
+        self.order_summary = QLabel(
+            "0 items | Total: $0.00"
+            if self._can_see_dollars
+            else "0 items | Total: \u2014"
+        )
         self.order_summary.setStyleSheet(
             "font-weight: bold; font-size: 13px;"
         )
@@ -176,6 +184,7 @@ class NewOrdersPage(QWidget):
             "font-weight: bold; padding: 8px 16px;"
         )
         self.confirm_btn.clicked.connect(self._on_confirm_order)
+        self.confirm_btn.setVisible("orders_create" in self._perms)
         action_row.addWidget(self.confirm_btn)
 
         mid_layout.addLayout(action_row)
@@ -298,7 +307,10 @@ class NewOrdersPage(QWidget):
                 QTableWidgetItem(part.part_number),
                 QTableWidgetItem(part.description or part.name),
                 QTableWidgetItem(str(part.quantity)),
-                QTableWidgetItem(format_currency(part.unit_cost)),
+                QTableWidgetItem(
+                    format_currency(part.unit_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
             ]
             # Highlight low stock
             if part.is_low_stock:
@@ -384,17 +396,26 @@ class NewOrdersPage(QWidget):
                 QTableWidgetItem(part.part_number),
                 QTableWidgetItem(part.description or part.name),
                 QTableWidgetItem(str(qty)),
-                QTableWidgetItem(format_currency(part.unit_cost)),
-                QTableWidgetItem(format_currency(subtotal)),
+                QTableWidgetItem(
+                    format_currency(part.unit_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
+                QTableWidgetItem(
+                    format_currency(subtotal)
+                    if self._can_see_dollars else "\u2014"
+                ),
             ]
             for col, cell in enumerate(cells):
                 self.table_item_align(cell, col)
                 self.order_table.setItem(row, col, cell)
 
         count = sum(item["qty"] for item in self._order_items)
+        total_str = (
+            format_currency(total) if self._can_see_dollars else "\u2014"
+        )
         self.order_summary.setText(
             f"{len(self._order_items)} items ({count} units) | "
-            f"Total: {format_currency(total)}"
+            f"Total: {total_str}"
         )
 
     def _on_update_qty(self):

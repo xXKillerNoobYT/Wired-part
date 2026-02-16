@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wired_part.database.models import Job, User
+from wired_part.database.models import Job, JobAssignment, User
 from wired_part.database.repository import Repository
 from wired_part.utils.constants import JOB_STATUSES
 from wired_part.utils.formatters import format_currency
@@ -38,8 +39,13 @@ class JobsPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._jobs: list[Job] = []
         self._selected_job: Optional[Job] = None
+        self._current_assignments: list[JobAssignment] = []
         self._setup_ui()
 
         # Default to "Active" for regular users, "All" for admins
@@ -155,7 +161,9 @@ class JobsPage(QWidget):
         )
         parts_layout.addWidget(self.parts_table, 1)
 
-        self.total_cost_label = QLabel("Total: $0.00")
+        self.total_cost_label = QLabel(
+            "Total: $0.00" if self._can_see_dollars else "Total: \u2014"
+        )
         self.total_cost_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         parts_layout.addWidget(self.total_cost_label)
 
@@ -181,6 +189,12 @@ class JobsPage(QWidget):
         self.users_list = QListWidget()
         self.users_list.setMinimumHeight(60)
         self.users_list.setMaximumHeight(120)
+        self.users_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.users_list.customContextMenuRequested.connect(
+            self._on_users_context_menu
+        )
         users_layout.addWidget(self.users_list)
 
         user_btns = QHBoxLayout()
@@ -272,7 +286,25 @@ class JobsPage(QWidget):
         action_btns.addWidget(self.work_report_btn)
 
         layout.addLayout(action_btns)
+        self._apply_permissions()
         return panel
+
+    def _apply_permissions(self):
+        """Hide buttons the current user is not permitted to use."""
+        p = self._perms
+        self.add_btn.setVisible("jobs_add" in p)
+        self.edit_btn.setVisible("jobs_edit" in p)
+        self.delete_btn.setVisible("jobs_delete" in p)
+        self.complete_btn.setVisible("jobs_edit" in p)
+        self.reactivate_btn.setVisible("jobs_edit" in p)
+        self.assign_user_btn.setVisible("jobs_assign" in p)
+        self.billing_btn.setVisible("jobs_billing" in p)
+        self.notes_btn.setVisible("jobs_notes" in p)
+        self.work_report_btn.setVisible("jobs_report" in p)
+        self.clock_in_btn.setVisible("labor_clock_in" in p)
+        self.clock_out_btn.setVisible("labor_clock_out" in p)
+        self.manual_entry_btn.setVisible("labor_manual_entry" in p)
+        self.view_labor_btn.setVisible("labor_view_all" in p)
 
     def refresh(self):
         """Reload jobs from the database."""
@@ -314,7 +346,9 @@ class JobsPage(QWidget):
         self.detail_priority.setText("-")
         self.detail_notes.setText("-")
         self.parts_table.setRowCount(0)
-        self.total_cost_label.setText("Total: $0.00")
+        self.total_cost_label.setText(
+            "Total: $0.00" if self._can_see_dollars else "Total: \u2014"
+        )
         self.users_list.clear()
         self.labor_summary_label.setText("No labor entries")
         for btn in (self.edit_btn, self.complete_btn, self.reactivate_btn,
@@ -367,17 +401,25 @@ class JobsPage(QWidget):
             )
             self.parts_table.setItem(
                 row, 3,
-                QTableWidgetItem(format_currency(jp.total_cost)),
+                QTableWidgetItem(
+                    format_currency(jp.total_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
             )
 
         total = self.repo.get_job_total_cost(job.id)
-        self.total_cost_label.setText(f"Total: {format_currency(total)}")
+        self.total_cost_label.setText(
+            f"Total: {format_currency(total)}"
+            if self._can_see_dollars else "Total: \u2014"
+        )
 
         # Load assigned users
-        assignments = self.repo.get_job_assignments(job.id)
+        self._current_assignments = self.repo.get_job_assignments(job.id)
         self.users_list.clear()
-        for a in assignments:
-            self.users_list.addItem(f"{a.user_name} ({a.role.title()})")
+        for idx, a in enumerate(self._current_assignments):
+            item = QListWidgetItem(f"{a.user_name} ({a.role.title()})")
+            item.setData(Qt.ItemDataRole.UserRole, idx)
+            self.users_list.addItem(item)
 
         # Load labor summary
         labor = self.repo.get_labor_summary_for_job(job.id)
@@ -540,6 +582,57 @@ class JobsPage(QWidget):
             self.repo, self._selected_job.id, parent=self
         )
         if dialog.exec():
+            self._on_job_selected(self.job_list.currentItem(), None)
+
+    # ── Assigned-user context menu ──────────────────────────────
+
+    def _on_users_context_menu(self, position):
+        """Right-click menu on assigned-users list."""
+        if not self._selected_job:
+            return
+        if self._selected_job.status != "active":
+            return
+        item = self.users_list.itemAt(position)
+        if item is None:
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx is None or idx >= len(self._current_assignments):
+            return
+        assignment = self._current_assignments[idx]
+
+        menu = QMenu(self)
+        new_role = "Lead" if assignment.role == "worker" else "Worker"
+        change_action = menu.addAction(f"Change to {new_role}")
+        remove_action = menu.addAction("Remove from Job")
+
+        action = menu.exec(self.users_list.mapToGlobal(position))
+        if action == change_action:
+            self._on_change_role(assignment)
+        elif action == remove_action:
+            self._on_remove_user(assignment)
+
+    def _on_change_role(self, assignment):
+        """Toggle role between lead and worker."""
+        new_role = "worker" if assignment.role == "lead" else "lead"
+        updated = JobAssignment(
+            job_id=assignment.job_id,
+            user_id=assignment.user_id,
+            role=new_role,
+        )
+        self.repo.assign_user_to_job(updated)
+        self._on_job_selected(self.job_list.currentItem(), None)
+
+    def _on_remove_user(self, assignment):
+        """Remove a user from the current job after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "Remove User",
+            f"Remove {assignment.user_name} from this job?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.repo.remove_user_from_job(assignment.id)
             self._on_job_selected(self.job_list.currentItem(), None)
 
     def _on_consume(self):

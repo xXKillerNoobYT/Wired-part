@@ -181,6 +181,49 @@ class User:
 
 
 @dataclass
+class UserSettings:
+    """Per-user preferences (v16)."""
+    id: Optional[int] = None
+    user_id: int = 0
+    theme: str = "dark"
+    font_size: int = 10
+    dashboard_cards: str = "[]"
+    default_truck_filter: str = "mine"
+    favorite_labor_categories: str = "[]"
+    notification_mute_list: str = "[]"
+    preferred_date_range: str = "This Period"
+    default_clock_in_job_id: Optional[int] = None
+    compact_mode: int = 0
+    sidebar_collapsed: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @property
+    def dashboard_card_list(self) -> list[str]:
+        import json
+        try:
+            return json.loads(self.dashboard_cards) if self.dashboard_cards else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def mute_list(self) -> list[str]:
+        import json
+        try:
+            return json.loads(self.notification_mute_list) if self.notification_mute_list else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def favorite_categories_list(self) -> list[str]:
+        import json
+        try:
+            return json.loads(self.favorite_labor_categories) if self.favorite_labor_categories else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+
+@dataclass
 class Truck:
     id: Optional[int] = None
     truck_number: str = ""
@@ -202,6 +245,7 @@ class TruckInventory:
     quantity: int = 0
     min_quantity: int = 0
     max_quantity: int = 0
+    updated_at: Optional[str] = None
     # Joined fields
     part_number: str = field(default="", repr=False)
     part_description: str = field(default="", repr=False)
@@ -301,6 +345,8 @@ class LaborEntry:
     clock_out_lon: Optional[float] = None
     is_overtime: int = 0
     bill_out_rate: str = ""  # BRO snapshot from job at time of entry
+    drive_time_minutes: int = 0
+    checkout_notes: str = "{}"
     created_at: Optional[datetime] = None
     # Joined fields
     user_name: str = field(default="", repr=False)
@@ -314,6 +360,14 @@ class LaborEntry:
             return json.loads(self.photos) if self.photos else []
         except (json.JSONDecodeError, TypeError):
             return []
+
+    @property
+    def checkout_notes_dict(self) -> dict:
+        import json
+        try:
+            return json.loads(self.checkout_notes) if self.checkout_notes else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
 
 @dataclass
@@ -684,19 +738,24 @@ class ActivityLogEntry:
 
 @dataclass
 class JobUpdate:
-    """Team communication entry for a job."""
+    """Team communication entry for a job (chat, DMs, status updates)."""
     id: Optional[int] = None
     job_id: int = 0
     user_id: int = 0
     message: str = ""
-    update_type: str = "comment"    # comment, status_change, assignment, milestone
+    update_type: str = "comment"    # comment, status_change, assignment, milestone, chat, dm
     is_pinned: int = 0
     photos: str = "[]"
+    recipient_id: Optional[int] = None  # v15: DM recipient (None = group chat)
+    is_read: int = 0                     # v15: read-receipt for DMs
+    edited_at: Optional[str] = None      # v15: last edit timestamp
+    reactions: str = "{}"                 # v15: JSON {emoji: [user_ids]}
     created_at: Optional[datetime] = None
     # Joined fields
     user_name: str = field(default="", repr=False)
     job_number: str = field(default="", repr=False)
     job_name: str = field(default="", repr=False)
+    recipient_name: str = field(default="", repr=False)
 
     @property
     def photo_list(self) -> list[str]:

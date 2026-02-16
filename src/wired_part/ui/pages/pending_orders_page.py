@@ -47,6 +47,10 @@ class PendingOrdersPage(QWidget):
         super().__init__()
         self.repo = repo
         self.current_user = current_user
+        self._perms: set[str] = set()
+        if current_user:
+            self._perms = repo.get_user_permissions(current_user.id)
+        self._can_see_dollars = "show_dollar_values" in self._perms
         self._orders: list[PurchaseOrder] = []
         self._setup_ui()
         self.refresh()
@@ -134,6 +138,16 @@ class PendingOrdersPage(QWidget):
         self.delete_btn.setEnabled(False)
         action_row.addWidget(self.delete_btn)
 
+        # Apply permission visibility
+        p = self._perms
+        self.new_btn.setVisible("orders_create" in p)
+        self.from_list_btn.setVisible("orders_create" in p)
+        self.supply_house_btn.setVisible("orders_create" in p)
+        self.split_btn.setVisible("orders_create" in p)
+        self.edit_btn.setVisible("orders_edit" in p)
+        self.submit_btn.setVisible("orders_submit" in p)
+        self.delete_btn.setVisible("orders_edit" in p)
+
         layout.addLayout(action_row)
 
         # ── Summary ────────────────────────────────────────────
@@ -209,7 +223,10 @@ class PendingOrdersPage(QWidget):
                 QTableWidgetItem(order.supplier_name),
                 QTableWidgetItem(status_label),
                 self._num_item(order.item_count),
-                QTableWidgetItem(format_currency(order.total_cost)),
+                QTableWidgetItem(
+                    format_currency(order.total_cost)
+                    if self._can_see_dollars else "\u2014"
+                ),
                 QTableWidgetItem(order.created_by_name),
                 QTableWidgetItem(date_str),
                 QTableWidgetItem(order.notes or ""),
@@ -225,9 +242,13 @@ class PendingOrdersPage(QWidget):
                 self.table.setItem(row, col, cell)
 
         self.table.setSortingEnabled(True)
+        total_str = (
+            format_currency(total_cost)
+            if self._can_see_dollars else "\u2014"
+        )
         self.summary_label.setText(
             f"{len(orders)} orders  |  "
-            f"Total: {format_currency(total_cost)}"
+            f"Total: {total_str}"
         )
 
     def _on_selection_changed(self):
@@ -345,14 +366,20 @@ class PendingOrdersPage(QWidget):
             lines.append(
                 f"  {i}. {item.part_number} — {item.part_description}"
             )
-            lines.append(
-                f"     Qty: {item.quantity_ordered}  |  "
-                f"Unit: {format_currency(item.unit_cost)}  |  "
-                f"Total: {format_currency(line_total)}"
-            )
+            if self._can_see_dollars:
+                lines.append(
+                    f"     Qty: {item.quantity_ordered}  |  "
+                    f"Unit: {format_currency(item.unit_cost)}  |  "
+                    f"Total: {format_currency(line_total)}"
+                )
+            else:
+                lines.append(
+                    f"     Qty: {item.quantity_ordered}"
+                )
 
         lines.append("-" * 50)
-        lines.append(f"Order Total: {format_currency(total)}")
+        if self._can_see_dollars:
+            lines.append(f"Order Total: {format_currency(total)}")
         lines.append("")
 
         if order.notes:
@@ -417,8 +444,9 @@ class PendingOrdersPage(QWidget):
         reply = QMessageBox.question(
             self, "Submit Order",
             f"Submit order {order.order_number} to {order.supplier_name}?\n"
-            f"({len(items)} items, "
-            f"{format_currency(order.total_cost)} total)",
+            f"({len(items)} items"
+            + (f", {format_currency(order.total_cost)} total"
+               if self._can_see_dollars else "") + ")",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:

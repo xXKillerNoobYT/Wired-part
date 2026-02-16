@@ -164,20 +164,23 @@ class TestLockedHats:
         with pytest.raises(ValueError, match="locked"):
             repo.delete_hat(it_hat.id)
 
-    def test_cannot_delete_office_hat(self, repo):
+    def test_office_hat_is_not_locked(self, repo):
+        """Office/HR hat can be deleted (it's no longer locked)."""
         office_hat = repo.get_hat_by_name(OFFICE_HAT)
-        with pytest.raises(ValueError, match="locked"):
-            repo.delete_hat(office_hat.id)
+        assert office_hat.id not in LOCKED_HAT_IDS
 
     def test_cannot_edit_locked_hat_permissions(self, repo):
         admin_hat = repo.get_hat_by_name(ADMIN_HAT)
         with pytest.raises(ValueError, match="locked"):
             repo.update_hat_permissions(admin_hat.id, ["tab_dashboard"])
 
-    def test_cannot_edit_office_hat_permissions(self, repo):
+    def test_can_edit_office_hat_permissions(self, repo):
+        """Office/HR hat permissions are editable now."""
         office_hat = repo.get_hat_by_name(OFFICE_HAT)
-        with pytest.raises(ValueError, match="locked"):
-            repo.update_hat_permissions(office_hat.id, ["tab_dashboard"])
+        repo.update_hat_permissions(office_hat.id, ["tab_dashboard", "tab_labor"])
+        updated = repo.get_hat_by_id(office_hat.id)
+        assert "tab_dashboard" in updated.permission_list
+        assert "tab_labor" in updated.permission_list
 
     def test_can_delete_custom_hat(self, repo):
         """Non-locked hats can be deleted normally."""
@@ -196,9 +199,19 @@ class TestLockedHats:
         updated = repo.get_hat_by_id(worker_hat.id)
         assert "tab_dashboard" in updated.permission_list
 
-    def test_only_three_hats_are_locked(self, repo):
-        """Only IDs 1, 2, 3 are locked. No others."""
-        assert LOCKED_HAT_IDS == {1, 2, 3}
+    def test_only_admin_it_hats_are_locked(self, repo):
+        """Only IDs 1, 2 (Admin, IT) are locked. Office/HR is editable."""
+        assert LOCKED_HAT_IDS == {1, 2}
+
+    def test_office_hat_permissions_editable(self, repo):
+        """Office/HR hat (ID 3) can have permissions edited."""
+        office_hat = repo.get_hat_by_id(3)
+        assert office_hat is not None
+        assert office_hat.id not in LOCKED_HAT_IDS
+        # Should be able to update its permissions
+        repo.update_hat_permissions(office_hat.id, ["tab_dashboard"])
+        updated = repo.get_hat_by_id(office_hat.id)
+        assert "tab_dashboard" in updated.permission_list
 
 
 class TestUserHatAssignment:

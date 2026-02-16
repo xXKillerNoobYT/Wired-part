@@ -12,14 +12,22 @@ from wired_part.database.schema import initialize_database
 from wired_part.utils.platform import get_font_family, get_primary_font_name
 
 
-def _load_theme(app: QApplication):
-    """Load the configured QSS theme stylesheet.
+def _load_theme(app: QApplication, theme: str | None = None):
+    """Load a QSS theme stylesheet.
 
     Injects the platform-appropriate font-family into the QSS before
     applying it, so the stylesheet always references the correct native
     font for the current OS.
+
+    Parameters
+    ----------
+    app:
+        The running QApplication.
+    theme:
+        Theme name (``"dark"``, ``"light"``, ``"retro"``).
+        Falls back to ``Config.APP_THEME`` when *None*.
     """
-    theme = Config.APP_THEME.lower()
+    theme = (theme or Config.APP_THEME).lower()
     styles_dir = Path(__file__).parent / "ui" / "styles"
     qss_file = styles_dir / f"{theme}.qss"
     if qss_file.exists():
@@ -79,6 +87,10 @@ def main():
         if current_user is None:
             # User cancelled the login dialog
             sys.exit(0)
+
+        # Apply the user's preferred theme (falls back to Config.APP_THEME)
+        settings = repo.get_or_create_user_settings(current_user.id)
+        _load_theme(app, settings.theme)
 
         window = MainWindow(db, current_user)
 

@@ -1,5 +1,7 @@
 """Background agent manager — runs audit, admin, and reminder agents on timers."""
 
+import time
+
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from wired_part.agent.handler import ToolHandler
@@ -12,12 +14,19 @@ from wired_part.config import Config
 from wired_part.database.models import User
 from wired_part.database.repository import Repository
 
+# Retry settings for waiting on a model to load.
+# Total worst-case wait: 5+10+20+40+60+60+60+60+60+60 = ~435 s (~7 min)
+MAX_CONNECT_RETRIES = 10
+INITIAL_BACKOFF_SECS = 5       # first retry after 5 s
+MAX_BACKOFF_SECS = 60          # cap at 60 s between retries
+
 
 class AgentWorker(QThread):
     """Runs a single background agent task in a thread."""
 
     finished = Signal(str, str)  # agent_name, result_text
     error = Signal(str, str)  # agent_name, error_text
+    status_update = Signal(str, str)  # agent_name, status_text
 
     def __init__(self, agent_name: str, system_prompt: str,
                  task_prompt: str, tool_handler: ToolHandler):
@@ -27,19 +36,51 @@ class AgentWorker(QThread):
         self.task_prompt = task_prompt
         self.tool_handler = tool_handler
 
+    def _wait_for_server(self, client) -> bool:
+        """Wait for LM Studio to become ready, retrying with backoff.
+
+        Returns True when server is reachable, False after all retries
+        exhausted.
+        """
+        backoff = INITIAL_BACKOFF_SECS
+        for attempt in range(1, MAX_CONNECT_RETRIES + 1):
+            try:
+                client.models.list()
+                return True
+            except Exception:
+                self.status_update.emit(
+                    self.agent_name,
+                    f"Waiting for LLM (attempt {attempt}/{MAX_CONNECT_RETRIES})\u2026",
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECS)
+        return False
+
     def run(self):
         try:
             import httpx
             from openai import OpenAI
+
+            # Generous timeouts — model loading can take up to 5 min
+            read_timeout = float(max(Config.LM_STUDIO_TIMEOUT, 120))
             client = OpenAI(
                 base_url=Config.LM_STUDIO_BASE_URL,
                 api_key=Config.LM_STUDIO_API_KEY,
                 timeout=httpx.Timeout(
-                    total=300.0,
-                    connect=10.0,
-                    read=float(Config.LM_STUDIO_TIMEOUT),
+                    total=600.0,
+                    connect=30.0,
+                    read=read_timeout,
                 ),
             )
+
+            # Wait for LM Studio / model to become ready (up to ~7 min)
+            if not self._wait_for_server(client):
+                self.error.emit(
+                    self.agent_name,
+                    "LLM server not reachable after retries. "
+                    "Is LM Studio running with a model loaded?",
+                )
+                return
 
             from wired_part.agent.tools import AGENT_TOOLS
 
@@ -86,6 +127,7 @@ class AgentManager(QObject):
 
     agent_completed = Signal(str, str)  # agent_name, result
     agent_error = Signal(str, str)  # agent_name, error
+    agent_status = Signal(str, str)  # agent_name, status_text
 
     def __init__(self, repo: Repository, current_user: User,
                  parent=None):
@@ -174,6 +216,7 @@ class AgentManager(QObject):
         )
         worker.finished.connect(self._on_agent_finished)
         worker.error.connect(self._on_agent_error)
+        worker.status_update.connect(self._on_agent_status)
         self._workers[agent_name] = worker
         worker.start()
 
@@ -190,3 +233,7 @@ class AgentManager(QObject):
         if agent_name in self._workers:
             del self._workers[agent_name]
         self.agent_error.emit(agent_name, error)
+
+    def _on_agent_status(self, agent_name: str, status: str):
+        """Forward interim status updates (e.g. 'Waiting for LLM')."""
+        self.agent_status.emit(agent_name, status)
